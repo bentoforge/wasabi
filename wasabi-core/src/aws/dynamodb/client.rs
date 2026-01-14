@@ -146,14 +146,12 @@ impl DynamoClient {
                 .with_context(|| {
                     format!(
                         "Faild to build proper create table request for: {}",
-                        &effective_name
+                        effective_name
                     )
                 })?
                 .send()
                 .await
-                .with_context(|| {
-                    format!("Failed to create DynamoDB table '{}'", &effective_name)
-                })?;
+                .with_context(|| format!("Failed to create DynamoDB table '{}'", effective_name))?;
 
             tracing::info!(
                 "Create Table '{}' was submitted to DynamoDB",
@@ -176,9 +174,7 @@ impl DynamoClient {
                 .table_name(table_name)
                 .send()
                 .await
-                .with_context(|| {
-                    format!("Failed to check table status of '{}'", &effective_name)
-                })?;
+                .with_context(|| format!("Failed to check table status of '{}'", effective_name))?;
 
             let status = resp
                 .table()

@@ -9,8 +9,6 @@ use crate::web::error::{ApiError, ResultExt};
 use anyhow::{Context, anyhow};
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt, TryStreamExt};
-use http::Request;
-use hyper::{Body, Server};
 use percent_encoding::percent_decode_str;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -18,20 +16,17 @@ use std::convert::Infallible;
 use std::env;
 use std::error::Error;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::str::FromStr;
-use std::task::Poll;
 use std::time::Duration;
 use tokio_util::bytes::Buf;
 use tokio_util::bytes::BufMut;
-use tracing::{Instrument, Span, debug_span};
+use tracing::debug_span;
 use warp::http::header::CONTENT_TYPE;
 use warp::http::{HeaderValue, StatusCode};
 use warp::reply::Response;
 use warp::{Filter, Rejection, Reply, http, reply};
 
 use crate::tools::{PinnedBytesStream, system};
-use tower::{Service, ServiceBuilder};
 
 /// Filter that extracts the Content-Length header as u64.
 pub fn content_length_header() -> impl Filter<Extract = (u64,), Error = Rejection> + Clone {
@@ -290,6 +285,40 @@ macro_rules! routes {
     };
 }
 
+/// Creates a tracing filter that wraps requests with a span.
+///
+/// Each request gets a `debug_span!("http_request")` that tracks method, path,
+/// and status code. With OpenTelemetry enabled, also extracts parent context
+/// from incoming headers.
+fn tracing_filter() -> warp::trace::Trace<impl Fn(warp::trace::Info<'_>) -> tracing::Span + Clone> {
+    warp::trace::trace(|info: warp::trace::Info<'_>| {
+        #[cfg_attr(not(feature = "open_telemetry"), allow(unused_mut))]
+        let mut span = debug_span!(
+            "http_request",
+            aws.service = crate::CLUSTER_ID.clone(),
+            http.method = %info.method(),
+            http.url = %info.path(),
+            http.status_code = tracing::field::Empty,
+        );
+
+        #[cfg(feature = "open_telemetry")]
+        open_telemetry::extract_parent_context(info.request_headers(), &mut span);
+
+        span
+    })
+}
+
+/// Converts any [`Reply`] into a [`Response`] and records its status code on the
+/// current `http_request` span.
+///
+/// Runs inside the [`tracing_filter`] span, so `Span::current()` resolves to the
+/// per-request span created for this request.
+fn record_status<R: Reply>(reply: R) -> Response {
+    let response = reply.into_response();
+    let _ = tracing::Span::current().record("http.status_code", response.status().as_u16() as i64);
+    response
+}
+
 /// Starts an HTTP server with tracing and graceful shutdown.
 ///
 /// Reads `BIND_ADDRESS` from environment. Waits for shutdown signal,
@@ -305,28 +334,27 @@ where
     let bind_address =
         SocketAddr::from_str(&bind_address).context("Failed to parse bind address.")?;
 
-    tracing::info!("Starting server at {}", bind_address.clone());
+    tracing::info!("Starting server at {}", bind_address);
 
-    let filter = routes.boxed().recover(handle_rejection);
+    // Recover first so rejections become responses, then map the unified reply
+    // to record the final status on the current `http_request` span, and only
+    // then wrap everything in the tracing filter. This keeps the span active
+    // (via `warp::trace`) while the status is recorded, and ensures recovered
+    // rejections are traced with their status too.
+    let filter = routes
+        .boxed()
+        .recover(handle_rejection)
+        .map(record_status)
+        .with(tracing_filter());
 
-    let svc = warp::service(filter);
-    let traced_svc = ServiceBuilder::new()
-        .layer_fn(|inner| TracingMiddleware { inner })
-        .service(svc);
+    tracing::info!("Running HTTP server at {}", bind_address);
 
-    let server = Server::bind(&bind_address).serve(hyper::service::make_service_fn(|_| {
-        let svc = traced_svc.clone();
-        async move { Ok::<_, Infallible>(svc) }
-    }));
-
-    tracing::info!(
-        "Running HTTP server at effective address {}",
-        server.local_addr()
-    );
-    server
-        .with_graceful_shutdown(system::await_shutdown())
+    warp::serve(filter)
+        .bind(bind_address)
         .await
-        .with_context(|| format!("Failed to bind HTTP server to {}", bind_address))?;
+        .graceful(system::await_shutdown())
+        .run()
+        .await;
 
     tracing::info!("HTTP Server has been stopped...");
     // Wait a bit to ensure all requests are processed and also permit background tasks to finish
@@ -336,54 +364,6 @@ where
     tracing::info!("HTTP Server has been terminated.");
 
     Ok(())
-}
-
-#[derive(Clone)]
-struct TracingMiddleware<S> {
-    inner: S,
-}
-
-impl<S> Service<Request<Body>> for TracingMiddleware<S>
-where
-    S: Service<Request<Body>, Response = Response, Error = Infallible> + Clone + Send + 'static,
-    S::Future: Send + 'static,
-{
-    type Response = S::Response;
-    type Error = S::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, req: Request<Body>) -> Self::Future {
-        let method = req.method().clone();
-        let path = req.uri().path().to_string();
-
-        #[cfg_attr(not(feature = "open_telemetry"), allow(unused_mut))]
-        let mut span = debug_span!(
-            "http_request",
-            aws.service = crate::CLUSTER_ID.clone(),
-            http.method = %method,
-            http.url = %path,
-            http.status_code = tracing::field::Empty,
-        );
-
-        #[cfg(feature = "open_telemetry")]
-        open_telemetry::extract_parent_context(req.headers(), &mut span);
-
-        let mut inner = self.inner.clone();
-
-        let fut = async move {
-            let response = inner.call(req).await?;
-            let status = response.status().as_u16();
-            let _ = Span::current().record("http.status_code", status as i64);
-            Ok(response)
-        }
-        .instrument(span);
-
-        Box::pin(fut)
-    }
 }
 
 /// A URL path segment that has been percent-decoded.
@@ -410,11 +390,10 @@ impl From<DecodedSegment> for String {
 
 #[cfg(feature = "open_telemetry")]
 mod open_telemetry {
-    use hyper::http::HeaderMap;
-
     use opentelemetry::propagation::Extractor;
     use tracing::Span;
     use tracing_opentelemetry::OpenTelemetrySpanExt;
+    use warp::http::HeaderMap;
 
     struct HeaderExtractor<'a> {
         headers: &'a HeaderMap,

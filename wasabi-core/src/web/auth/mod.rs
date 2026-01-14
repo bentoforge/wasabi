@@ -130,9 +130,9 @@ mod tests {
         with_user_with_any_permission,
     };
     use crate::web::error::ApiError;
-    use hyper::StatusCode;
     use serde_json::json;
     use std::sync::Arc;
+    use warp::http::StatusCode;
 
     #[tokio::test]
     async fn with_user_succeeds_with_valid_token() {

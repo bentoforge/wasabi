@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tokio = { version = "1.48", features = ["full"] }
+tokio = { version = "1.49", features = ["full"] }
 futures-util = "0.3"
 futures = "0.3"
 async-stream = "0.3"
 tokio-util = "0.7"
-warp = "0.3.7"
+warp = { version = "0.4", features = ["server"] }
 bytes = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision"] }
@@ -45,9 +45,7 @@ jwks = { version = "0.5", default-features = false, features = ["aws_lc_rs"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "charset"] }
 arc-swap = "1.7"
 nu-ansi-term = { version = "0.50", optional = true }
-rand = "0.9.0"
-tower = "0.5.2"
-hyper = "0.14"
+rand = "0.9"
 percent-encoding = "2.3.2"
 async-trait = { version = "0.1" }
 bytesize = "2.3"
@@ -64,6 +62,7 @@ comemo = { version = "0.4", optional = true }
 
 [dev-dependencies]
 mock_instant = "0.6"
+warp = { version = "0.4", features = ["test"] }
 
 [features]
 default = []
