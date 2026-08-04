@@ -31,7 +31,11 @@ use async_trait::async_trait;
 use aws_sdk_s3::primitives::{AggregatedBytes, ByteStream};
 use aws_sdk_s3::types::CompletedMultipartUpload;
 use aws_sdk_s3::types::CompletedPart;
-use aws_sdk_s3::types::{BucketLocationConstraint, CreateBucketConfiguration};
+use aws_sdk_s3::types::{
+    BucketLifecycleConfiguration, BucketLocationConstraint, BucketVersioningStatus,
+    CreateBucketConfiguration, ExpirationStatus, LifecycleRule, LifecycleRuleFilter,
+    NoncurrentVersionExpiration, VersioningConfiguration,
+};
 use aws_sdk_s3::{Client, config};
 use bytes::{Buf, Bytes};
 use bytesize::{KB, MB};
@@ -81,6 +85,31 @@ impl Display for BucketName {
             BucketName::ConstPrefix(prefix) => write!(f, "{}...", prefix),
             BucketName::Prefix(prefix) => write!(f, "{}...", prefix),
         }
+    }
+}
+
+/// Retention policy for *noncurrent* (superseded) object versions, applied as an S3 lifecycle rule
+/// by [`S3Client::enable_versioning`]. Both knobs are optional and compose:
+///
+/// - `keep_newest` — retain at least this many of the most recent noncurrent versions
+///   (S3 `NewerNoncurrentVersions`).
+/// - `expire_after_days` — expire a noncurrent version this many days after it becomes noncurrent
+///   (S3 `NoncurrentDays`).
+///
+/// An all-`None` value is a no-op (versioning on, nothing expired). With only `keep_newest`, a
+/// 1-day floor is used for the required `NoncurrentDays`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VersionRetention {
+    /// Number of newest noncurrent versions to keep before older ones may expire.
+    pub keep_newest: Option<i32>,
+    /// Days after a version becomes noncurrent before it expires.
+    pub expire_after_days: Option<i32>,
+}
+
+impl VersionRetention {
+    /// Returns `true` when neither knob is set (no lifecycle rule should be written).
+    pub fn is_empty(&self) -> bool {
+        self.keep_newest.is_none() && self.expire_after_days.is_none()
     }
 }
 
@@ -294,6 +323,94 @@ impl S3Client {
         }
     }
 
+    /// Enables versioning on a bucket so overwritten/deleted objects retain their prior versions,
+    /// and optionally applies a retention lifecycle for the *noncurrent* (superseded) versions.
+    ///
+    /// Versioning itself is only on/off — "how many" / "how long" are expressed as an S3 lifecycle
+    /// rule on noncurrent versions (see [`VersionRetention`]). Pass `None` (or an empty retention)
+    /// to enable versioning without any expiry, letting noncurrent versions accumulate.
+    ///
+    /// Idempotent: setting `Enabled`/re-applying the same lifecycle is a no-op. Once enabled,
+    /// versioning cannot be turned off (only suspended), matching S3's own semantics. The two
+    /// underlying calls need `s3:PutBucketVersioning` and (for retention) `s3:PutLifecycleConfiguration`.
+    #[tracing::instrument(skip(self), err(Display))]
+    pub async fn enable_versioning(
+        &self,
+        bucket: &BucketName,
+        retention: Option<VersionRetention>,
+    ) -> anyhow::Result<()> {
+        let effective_name = self.effective_name(bucket);
+
+        let _ = self
+            .client
+            .put_bucket_versioning()
+            .bucket(&effective_name)
+            .versioning_configuration(
+                VersioningConfiguration::builder()
+                    .status(BucketVersioningStatus::Enabled)
+                    .build(),
+            )
+            .send()
+            .await
+            .with_context(|| format!("Failed to enable versioning on bucket '{effective_name}'"))?;
+
+        tracing::info!("Versioning enabled on bucket '{effective_name}'");
+
+        if let Some(retention) = retention.filter(|retention| !retention.is_empty()) {
+            self.apply_noncurrent_version_retention(&effective_name, retention)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Applies a lifecycle rule expiring noncurrent object versions per `retention`.
+    #[tracing::instrument(skip(self), err(Display))]
+    async fn apply_noncurrent_version_retention(
+        &self,
+        effective_name: &str,
+        retention: VersionRetention,
+    ) -> anyhow::Result<()> {
+        let mut expiration = NoncurrentVersionExpiration::builder();
+        // S3 requires `noncurrent_days` for the rule to act; when only a keep-count is given, use
+        // the 1-day floor so "keep the newest N" takes effect a day after a version is superseded.
+        expiration = expiration.noncurrent_days(retention.expire_after_days.unwrap_or(1));
+        if let Some(keep) = retention.keep_newest {
+            expiration = expiration.newer_noncurrent_versions(keep);
+        }
+
+        let rule = LifecycleRule::builder()
+            .id("umami-noncurrent-version-retention")
+            .status(ExpirationStatus::Enabled)
+            .filter(LifecycleRuleFilter::builder().prefix("").build())
+            .noncurrent_version_expiration(expiration.build())
+            .build()
+            .context("Failed to build lifecycle rule")?;
+
+        let _ = self
+            .client
+            .put_bucket_lifecycle_configuration()
+            .bucket(effective_name)
+            .lifecycle_configuration(
+                BucketLifecycleConfiguration::builder()
+                    .rules(rule)
+                    .build()
+                    .context("Failed to build lifecycle configuration")?,
+            )
+            .send()
+            .await
+            .with_context(|| {
+                format!("Failed to set version retention on bucket '{effective_name}'")
+            })?;
+
+        tracing::info!(
+            "Noncurrent-version retention applied on bucket '{effective_name}' (keep_newest={:?}, expire_after_days={:?})",
+            retention.keep_newest,
+            retention.expire_after_days
+        );
+        Ok(())
+    }
+
     /// Deletes an object from S3.
     #[tracing::instrument(level = "debug", skip(self), err(Display))]
     pub async fn delete_object(&self, bucket: &BucketName, key: &str) -> anyhow::Result<()> {
@@ -309,7 +426,7 @@ impl S3Client {
             .with_context(|| {
                 format!(
                     "Failed to delete '{}' from bucket '{}'",
-                    key, &effective_bucket
+                    key, effective_bucket
                 )
             })?;
 
