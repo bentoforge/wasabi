@@ -39,12 +39,11 @@ jobs:
         run: cargo clippy --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --workspace --all-features
 
       - name: Run audit
-        # RUSTSEC-2026-0194 (quick-xml quadratic runtime on duplicate attributes)
-        # RUSTSEC-2026-0195 (quick-xml unbounded namespace allocation)
-        # Both are transitive via typst → citationberg → quick-xml 0.38.4. Only
-        # exploitable when parsing untrusted XML, which we do not. Waiting on
-        # typst to bump quick-xml to >=0.41.
-        run: cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+        # Ignored advisories are configured in .cargo/audit.toml (all
+        # transitive via the typst/pdf dependency chain and not fixable
+        # without an upstream release). See that file for per-advisory
+        # rationale.
+        run: cargo audit
