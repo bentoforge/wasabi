@@ -16,11 +16,10 @@ mod world;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use typst::layout::PagedDocument;
-use typst::text::FontBook;
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt as _};
-use typst_kit::fonts::{FontSlot, Fonts};
+use typst_kit::fonts::FontStore;
+use typst_layout::PagedDocument;
 
 use self::error::PdfError;
 use self::world::PdfWorld;
@@ -31,8 +30,7 @@ use self::world::PdfWorld;
 /// render calls. Each `render()` creates a fresh `PdfWorld`.
 pub struct PdfRenderer {
     template: String,
-    font_book: Arc<LazyHash<FontBook>>,
-    fonts: Arc<Vec<FontSlot>>,
+    fonts: Arc<FontStore>,
     library: Arc<LazyHash<Library>>,
     base_dir: Option<PathBuf>,
 }
@@ -40,16 +38,16 @@ pub struct PdfRenderer {
 impl PdfRenderer {
     /// Create a new renderer with the given Typst template source.
     pub fn new(template: &str) -> Self {
-        let font_data: Fonts = typst_kit::fonts::FontSearcher::new()
-            .include_system_fonts(false)
-            .search();
+        // Only the embedded fonts are used; system fonts are intentionally
+        // excluded so rendering is deterministic across deployments.
+        let mut fonts = FontStore::new();
+        fonts.extend(typst_kit::fonts::embedded());
 
         let library = Arc::new(LazyHash::new(Library::default()));
 
         Self {
             template: template.to_string(),
-            font_book: Arc::new(LazyHash::new(font_data.book)),
-            fonts: Arc::new(font_data.fonts),
+            fonts: Arc::new(fonts),
             library,
             base_dir: None,
         }
@@ -67,10 +65,9 @@ impl PdfRenderer {
             &self.template,
             data.clone(),
             self.base_dir.clone(),
-            self.font_book.clone(),
             self.fonts.clone(),
             self.library.clone(),
-        );
+        )?;
 
         let document: typst::diag::Warned<typst::diag::SourceResult<PagedDocument>> =
             typst::compile(&world);

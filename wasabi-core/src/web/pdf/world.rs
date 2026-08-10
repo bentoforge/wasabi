@@ -6,12 +6,14 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{Datelike, Timelike};
 use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime};
-use typst::syntax::{FileId, Source, VirtualPath};
+use typst::foundations::{Bytes, Datetime, Duration};
+use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, World};
+use typst_kit::fonts::FontStore;
 
+use super::error::PdfError;
 use super::schemes;
 
 /// A minimal typst `World` for server-side PDF rendering.
@@ -23,8 +25,7 @@ pub struct PdfWorld {
     main_id: FileId,
     data: serde_json::Value,
     base_dir: Option<PathBuf>,
-    font_book: Arc<LazyHash<FontBook>>,
-    fonts: Arc<Vec<typst_kit::fonts::FontSlot>>,
+    fonts: Arc<FontStore>,
     library: Arc<LazyHash<Library>>,
     file_cache: Mutex<HashMap<FileId, Bytes>>,
 }
@@ -35,23 +36,23 @@ impl PdfWorld {
         template: &str,
         data: serde_json::Value,
         base_dir: Option<PathBuf>,
-        font_book: Arc<LazyHash<FontBook>>,
-        fonts: Arc<Vec<typst_kit::fonts::FontSlot>>,
+        fonts: Arc<FontStore>,
         library: Arc<LazyHash<Library>>,
-    ) -> Self {
-        let main_id = FileId::new(None, VirtualPath::new("/main.typ"));
+    ) -> Result<Self, PdfError> {
+        let vpath = VirtualPath::new("/main.typ")
+            .map_err(|e| PdfError::Template(format!("invalid main path: {e}")))?;
+        let main_id = FileId::new(RootedPath::new(VirtualRoot::Project, vpath));
         let main_source = Source::new(main_id, template.to_string());
 
-        Self {
+        Ok(Self {
             main_source,
             main_id,
             data,
             base_dir,
-            font_book,
             fonts,
             library,
             file_cache: Mutex::new(HashMap::new()),
-        }
+        })
     }
 
     /// Resolve a file based on its virtual path prefix.
@@ -63,7 +64,7 @@ impl PdfWorld {
         }
 
         let vpath = id.vpath();
-        let path_str = vpath.as_rooted_path().to_string_lossy();
+        let path_str = vpath.get_with_slash();
 
         let to_file_err = |e: super::error::PdfError| FileError::Other(Some(e.to_string().into()));
 
@@ -77,8 +78,8 @@ impl PdfWorld {
             let url = format!("https:{rest}");
             schemes::resolve_https(&url).map_err(to_file_err)
         } else if let Some(base) = &self.base_dir {
-            let rootless = vpath.as_rootless_path().to_string_lossy();
-            schemes::resolve_local(base, &rootless).map_err(to_file_err)
+            let rootless = vpath.get_without_slash();
+            schemes::resolve_local(base, rootless).map_err(to_file_err)
         } else {
             Err(FileError::Other(Some(
                 format!("cannot resolve path: {path_str}").into(),
@@ -101,7 +102,7 @@ impl World for PdfWorld {
     }
 
     fn book(&self) -> &LazyHash<FontBook> {
-        &self.font_book
+        self.fonts.book()
     }
 
     fn main(&self) -> FileId {
@@ -121,15 +122,24 @@ impl World for PdfWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        self.fonts.get(index).and_then(|slot| slot.get())
+        self.fonts.font(index)
     }
 
-    fn today(&self, offset: Option<i64>) -> Option<Datetime> {
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
         let now = chrono::Local::now();
         let naive = match offset {
             Some(o) => {
-                let utc = now.naive_utc();
-                utc + chrono::Duration::hours(o)
+                // typst hands us a `Duration`; recombine its components into a
+                // total second offset (saturating, to stay panic-free) and add
+                // it to UTC.
+                let [weeks, days, hours, minutes, seconds] = o.decompose();
+                let total_seconds = seconds
+                    .saturating_add(minutes.saturating_mul(60))
+                    .saturating_add(hours.saturating_mul(3600))
+                    .saturating_add(days.saturating_mul(86_400))
+                    .saturating_add(weeks.saturating_mul(604_800));
+                let delta = chrono::Duration::try_seconds(total_seconds)?;
+                now.naive_utc().checked_add_signed(delta)?
             }
             None => now.naive_local(),
         };
