@@ -16,6 +16,7 @@ use warp::{Filter, Rejection};
 pub mod authenticator;
 pub mod claim_transformer;
 pub mod github_oidc;
+pub mod permission_expr;
 pub mod user;
 
 mod jwks;
@@ -98,6 +99,33 @@ pub fn enforce_user_with_any_permission(
     with_user(authenticator)
         .and_then(move |user: User| async move {
             user.enforce_any_permission(permissions)
+                .map(|_| ())
+                .map_err(into_rejection)
+        })
+        .untuple_one()
+}
+
+/// Filter that validates a JWT and requires the given permission-string **expression** to hold
+/// (`,` = OR, `+` = AND, `!` = NOT; empty = no restriction). Returns the authenticated [`User`].
+/// See [`permission_expr`].
+pub fn with_user_with(
+    authenticator: Arc<Authenticator>,
+    expression: &'static str,
+) -> impl Filter<Extract = (User,), Error = Rejection> + Clone {
+    with_user(authenticator).and_then(move |user: User| async move {
+        user.enforce_permission_expr(expression)
+            .map_err(into_rejection)
+    })
+}
+
+/// Filter that validates a permission-string expression without extracting the User (for guards).
+pub fn enforce_user_with(
+    authenticator: Arc<Authenticator>,
+    expression: &'static str,
+) -> impl Filter<Extract = (), Error = Rejection> + Clone {
+    with_user(authenticator)
+        .and_then(move |user: User| async move {
+            user.enforce_permission_expr(expression)
                 .map(|_| ())
                 .map_err(into_rejection)
         })

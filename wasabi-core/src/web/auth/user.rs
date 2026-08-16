@@ -4,6 +4,7 @@
 //! to standard fields like tenant, user ID, name, email, and permissions.
 
 use crate::status_bail;
+use crate::web::auth::permission_expr::eval_permission_expr;
 use crate::web::auth::{
     CLAIM_ACT, CLAIM_EMAIL, CLAIM_ISS, CLAIM_LOCALE, CLAIM_NAME, CLAIM_PERMISSIONS, CLAIM_SUB,
     CLAIM_TENANT, DEFAULT_LOCALE,
@@ -114,6 +115,37 @@ impl User {
                 StatusCode::UNAUTHORIZED,
                 "One of the permissions '{}' is required for this action",
                 permissions.join(", ")
+            );
+        }
+    }
+
+    /// Returns `true` if the user's granted permissions satisfy the boolean permission-string
+    /// `expression` (`,` = OR, `+` = AND, `!` = NOT; empty = no restriction). See
+    /// [`permission_expr`](crate::web::auth::permission_expr).
+    pub fn has_permission_expr(&self, expression: &str) -> bool {
+        let granted: HashSet<&str> = self
+            .claims
+            .get(CLAIM_PERMISSIONS)
+            .and_then(Value::as_array)
+            .map(|permissions| {
+                permissions
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<HashSet<&str>>()
+            })
+            .unwrap_or_default();
+        eval_permission_expr(expression, |term| granted.contains(term))
+    }
+
+    /// Returns the user if their permissions satisfy `expression`, otherwise 401.
+    pub fn enforce_permission_expr(self, expression: &str) -> anyhow::Result<Self> {
+        if self.has_permission_expr(expression) {
+            Ok(self)
+        } else {
+            status_bail!(
+                StatusCode::UNAUTHORIZED,
+                "The permission expression '{}' must be satisfied for this action",
+                expression
             );
         }
     }
