@@ -417,6 +417,39 @@ mod open_telemetry {
     }
 }
 
+/// Build a keep-alive SSE reply from an event stream that is `Send` but may be `!Sync`.
+///
+/// warp 0.4 / hyper 1.x require an SSE event stream to be `Send + Sync`. Streams that
+/// `await` AWS SDK (aws-smithy) futures — Bedrock, DynamoDB, Firehose — are `Send`-only,
+/// so any handler that yields SSE events while touching AWS is `!Sync` and cannot be
+/// passed to [`warp::sse::reply`] directly.
+///
+/// This drives `events` on a detached task and re-emits each item through a bounded
+/// channel; the channel receiver is `Send + Sync`, so route handlers get a working SSE
+/// reply without laundering the stream by hand. The bounded capacity preserves
+/// backpressure onto the producer. The task ends when the producer finishes or the
+/// client disconnects (the receiver is dropped).
+pub fn sse_keep_alive_reply<S, E>(events: S) -> Response
+where
+    S: Stream<Item = Result<warp::sse::Event, E>> + Send + 'static,
+    E: Error + Send + Sync + 'static,
+{
+    use futures::SinkExt;
+
+    let (mut tx, rx) = futures::channel::mpsc::channel(32);
+    let _drive = tokio::spawn(async move {
+        futures::pin_mut!(events);
+        while let Some(event) = events.next().await {
+            if tx.send(event).await.is_err() {
+                // Client disconnected: stop driving the producer.
+                break;
+            }
+        }
+    });
+
+    warp::sse::reply(warp::sse::keep_alive().stream(rx)).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
