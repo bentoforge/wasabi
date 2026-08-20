@@ -80,6 +80,12 @@ impl User {
             .mark_client_error()
     }
 
+    /// Returns a raw claim value by name, if present. Escape hatch for application-specific claims
+    /// beyond the typed accessors above (e.g. an `amr` / auth-strength claim carried by the issuer).
+    pub fn claim(&self, name: &str) -> Option<&Value> {
+        self.claims.get(name)
+    }
+
     /// Returns `true` if the user has at least one of the given permissions.
     pub fn has_any_permission(&self, permissions: &[&str]) -> bool {
         if let Some(granted_permission) = self
