@@ -17,6 +17,7 @@ use std::env;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio_util::bytes::Buf;
 use tokio_util::bytes::BufMut;
@@ -38,6 +39,52 @@ pub fn with_cloneable<C: Clone + Send>(
     value: C,
 ) -> impl Filter<Extract = (C,), Error = Infallible> + Clone {
     warp::any().map(move || value.clone())
+}
+
+/// Filter yielding the best-effort client IP as `Option<String>`.
+///
+/// Whether `X-Forwarded-For` is trusted is a deployment property, so it's read once from the
+/// `TRUST_FORWARDED_FOR` environment variable (truthy: `1`/`true`/`yes`/`on`) rather than passed by
+/// each caller. When unset/false (a directly-exposed service) only the TCP peer address is used, so
+/// a client cannot spoof its IP. When true (behind a trusted reverse proxy / load balancer that
+/// sets the header) the **rightmost** `X-Forwarded-For` entry is preferred — the address the nearest
+/// trusted proxy observed and appended, which a client cannot forge (it can only prepend earlier
+/// entries, which are ignored) — falling back to the peer address when the header is absent.
+///
+/// Only enable it behind exactly one trusted proxy that appends the client address; otherwise the
+/// reported IP is a proxy in the chain, not the end client.
+pub fn client_ip() -> impl Filter<Extract = (Option<String>,), Error = Rejection> + Clone {
+    let trust_forwarded = trust_forwarded_for();
+    warp::filters::addr::remote()
+        .and(warp::header::optional::<String>("x-forwarded-for"))
+        .map(move |peer: Option<SocketAddr>, forwarded: Option<String>| {
+            if trust_forwarded
+                && let Some(ip) = forwarded
+                    .as_deref()
+                    .and_then(|xff| xff.rsplit(',').map(str::trim).find(|part| !part.is_empty()))
+            {
+                return Some(ip.to_owned());
+            }
+            peer.map(|addr| addr.ip().to_string())
+        })
+}
+
+/// Whether `X-Forwarded-For` should be trusted, from `TRUST_FORWARDED_FOR` (default `false`).
+///
+/// The environment variable is a deployment property that doesn't change at runtime, so it's parsed
+/// once on first access and the resulting bool is cached for the life of the process.
+pub fn trust_forwarded_for() -> bool {
+    static TRUST_FORWARDED: OnceLock<bool> = OnceLock::new();
+    *TRUST_FORWARDED.get_or_init(|| {
+        env::var("TRUST_FORWARDED_FOR")
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Filter that reads the request body into a `Vec<u8>`, enforcing size limits.
