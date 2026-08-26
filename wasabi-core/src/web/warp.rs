@@ -22,6 +22,7 @@ use std::time::Duration;
 use tokio_util::bytes::Buf;
 use tokio_util::bytes::BufMut;
 use tracing::debug_span;
+use warp::filters::BoxedFilter;
 use warp::http::header::CONTENT_TYPE;
 use warp::http::{HeaderValue, StatusCode};
 use warp::reply::Response;
@@ -313,12 +314,68 @@ pub fn into_rejection(err: anyhow::Error) -> Rejection {
     }
 }
 
-async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
+/// Turns a rejection carrying an [`ApiError`] into a JSON response with the error's status code.
+///
+/// Rejections which do not carry an [`ApiError`] are passed on unchanged so that warp's own
+/// handling (e.g. `404` for an unmatched path) stays intact.
+///
+/// [`run_webserver`] installs this via [`recover_api_errors`], so a running server always reports
+/// the real status code. Route-level tests, however, exercise a single filter without any recovery
+/// installed, which makes every [`ApiError`] rejection surface as a bare `500`. Wrap the route
+/// under test in [`recover_api_errors`] (or `.recover(handle_rejection)`) to get the status a real
+/// client would see:
+///
+/// ```
+/// use wasabi_core::web::error::ApiError;
+/// use wasabi_core::web::warp::recover_api_errors;
+/// use warp::Filter;
+/// use warp::http::StatusCode;
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let route = warp::path("secret").and_then(|| async {
+///     Err::<&str, warp::Rejection>(ApiError::new(StatusCode::FORBIDDEN, "Missing permission").into())
+/// });
+///
+/// let response = warp::test::request()
+///     .path("/secret")
+///     .reply(&recover_api_errors(route))
+///     .await;
+///
+/// // Without the recovery this would be a bare 500.
+/// assert_eq!(response.status(), StatusCode::FORBIDDEN);
+/// # }
+/// ```
+pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
     if let Some(err) = err.find::<ApiError>() {
         Ok(reply::with_status(reply::json(&err), err.status))
     } else {
         Err(err)
     }
+}
+
+/// Wraps `route` so that rejections carrying an [`ApiError`] become responses with their real
+/// status code, using [`handle_rejection`].
+///
+/// This is the same recovery [`run_webserver`] installs; use it in tests of individual route
+/// filters, which otherwise report every [`ApiError`] rejection as a bare `500`.
+pub fn recover_api_errors<F>(route: F) -> BoxedFilter<(Response,)>
+where
+    F: Filter + Clone + Send + Sync + 'static,
+    F::Extract: Reply,
+    F::Error: Into<Rejection> + 'static,
+{
+    route
+        .boxed()
+        .recover(handle_rejection)
+        .map(into_response_reply)
+        .boxed()
+}
+
+/// Converts any [`Reply`] into a [`Response`] so that recovered and regular replies unify into a
+/// single extract type.
+fn into_response_reply<R: Reply>(reply: R) -> Response {
+    reply.into_response()
 }
 
 /// Combines multiple routes using `or`. Usage: `routes![route1, route2, route3]`
@@ -388,9 +445,7 @@ where
     // then wrap everything in the tracing filter. This keeps the span active
     // (via `warp::trace`) while the status is recorded, and ensures recovered
     // rejections are traced with their status too.
-    let filter = routes
-        .boxed()
-        .recover(handle_rejection)
+    let filter = recover_api_errors(routes)
         .map(record_status)
         .with(tracing_filter());
 
@@ -505,6 +560,38 @@ mod tests {
     use futures_util::StreamExt;
     use futures_util::stream;
     use std::str::FromStr;
+
+    // handle_rejection / recover_api_errors tests
+
+    #[tokio::test]
+    async fn recover_api_errors_reports_the_api_error_status() {
+        let route = warp::path("secret").and_then(|| async {
+            Err::<&str, Rejection>(ApiError::new(StatusCode::FORBIDDEN, "nope").into())
+        });
+
+        let response = warp::test::request()
+            .path("/secret")
+            .reply(&recover_api_errors(route))
+            .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            String::from_utf8_lossy(response.body()),
+            r#"{"message":"nope"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_api_errors_keeps_unrelated_rejections() {
+        let route = warp::path("known").map(|| "ok");
+
+        let response = warp::test::request()
+            .path("/unknown")
+            .reply(&recover_api_errors(route))
+            .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 
     // as_size_limited_stream tests
 
