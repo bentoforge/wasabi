@@ -13,7 +13,9 @@ use aws_sdk_dynamodb::operation::get_item::builders::GetItemFluentBuilder;
 use aws_sdk_dynamodb::operation::put_item::builders::PutItemFluentBuilder;
 use aws_sdk_dynamodb::operation::query::builders::QueryFluentBuilder;
 use aws_sdk_dynamodb::operation::update_item::builders::UpdateItemFluentBuilder;
-use aws_sdk_dynamodb::types::{AttributeValue, TableStatus};
+use aws_sdk_dynamodb::types::{
+    AttributeValue, TableStatus, TimeToLiveSpecification, TimeToLiveStatus,
+};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
@@ -165,6 +167,129 @@ impl DynamoClient {
         }
     }
 
+    /// Creates a table like [`create_table`](Self::create_table) and makes sure its DynamoDB TTL
+    /// is enabled on `ttl_attribute`.
+    ///
+    /// TTL is a separate API from `CreateTable`, which is why it is so easily forgotten: a service
+    /// happily writes an expiry attribute that nothing ever acts on, and the table grows without
+    /// bound until somebody reads the bill. Convergence therefore runs on **every** boot, not only
+    /// when the table is created — otherwise deployments whose tables predate this call would never
+    /// get TTL at all.
+    ///
+    /// The attribute must hold an epoch-seconds **number**; DynamoDB silently ignores items whose
+    /// TTL attribute is a string or missing.
+    pub async fn create_table_with_ttl<F>(
+        &self,
+        name: &str,
+        ttl_attribute: &str,
+        callback: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnOnce(CreateTableFluentBuilder) -> Result<CreateTableFluentBuilder, BuildError>,
+    {
+        self.create_table(name, callback).await?;
+        self.ensure_time_to_live(name, ttl_attribute).await
+    }
+
+    /// Enables the DynamoDB TTL on `attribute`, unless it is already enabled on it.
+    ///
+    /// Idempotent by describing first: `UpdateTimeToLive` on an already-enabled table is a
+    /// `ValidationException`, and the call is rate-limited per table, so blindly re-issuing it on
+    /// every boot would eventually start failing.
+    ///
+    /// **Never fatal.** A missing `dynamodb:UpdateTimeToLive` permission would otherwise take a
+    /// whole service down on upgrade over housekeeping — including deployments whose IAM policy
+    /// predates this call. Failures are logged at WARN with the manual remedy, and the table simply
+    /// keeps its rows, exactly as before.
+    pub async fn ensure_time_to_live(&self, name: &str, attribute: &str) -> anyhow::Result<()> {
+        let effective_name = self.effective_name(name);
+
+        let described = match self
+            .client
+            .describe_time_to_live()
+            .table_name(&effective_name)
+            .send()
+            .await
+        {
+            Ok(described) => described,
+            Err(err) => {
+                tracing::warn!(
+                    "Could not read the TTL status of '{}' ({}). Enable it manually: aws dynamodb \
+                     update-time-to-live --table-name {} --time-to-live-specification \
+                     'Enabled=true,AttributeName={}'",
+                    effective_name,
+                    err,
+                    effective_name,
+                    attribute
+                );
+                return Ok(());
+            }
+        };
+
+        let description = described.time_to_live_description();
+        let status = description.and_then(|d| d.time_to_live_status());
+        let current_attribute = description.and_then(|d| d.attribute_name());
+
+        match status {
+            Some(TimeToLiveStatus::Enabled) if current_attribute == Some(attribute) => {
+                return Ok(());
+            }
+            Some(TimeToLiveStatus::Enabled) => {
+                // Enabled on a *different* attribute. Switching it would need a disable/enable
+                // cycle and would change which rows expire — too destructive to do implicitly.
+                tracing::warn!(
+                    "Table '{}' has TTL enabled on '{}', not on the expected '{}'. Leaving it \
+                     alone: switching would change which rows expire.",
+                    effective_name,
+                    current_attribute.unwrap_or("<unknown>"),
+                    attribute
+                );
+                return Ok(());
+            }
+            // A transition is already in flight (they take minutes); the next boot converges.
+            Some(TimeToLiveStatus::Enabling) | Some(TimeToLiveStatus::Disabling) => return Ok(()),
+            _ => {}
+        }
+
+        let specification = TimeToLiveSpecification::builder()
+            .enabled(true)
+            .attribute_name(attribute)
+            .build()
+            .with_context(|| {
+                format!("Failed to build a TTL specification for '{effective_name}'")
+            })?;
+
+        match self
+            .client
+            .update_time_to_live()
+            .table_name(&effective_name)
+            .time_to_live_specification(specification)
+            .send()
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    "Enabled DynamoDB TTL on '{}' (attribute '{}')",
+                    effective_name,
+                    attribute
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Could not enable TTL on '{}' ({}) — rows will not expire. Enable it manually: \
+                     aws dynamodb update-time-to-live --table-name {} --time-to-live-specification \
+                     'Enabled=true,AttributeName={}'",
+                    effective_name,
+                    err,
+                    effective_name,
+                    attribute
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     async fn wait_until_table_becomes_active(&self, table_name: &str) -> anyhow::Result<()> {
         let effective_name = self.effective_name(table_name);
         for _ in 0..15 {
@@ -276,6 +401,7 @@ mod tests {
     use crate::aws::test::test_run_id;
     use aws_sdk_dynamodb::types::{
         AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
+        TimeToLiveStatus,
     };
     use std::env;
     use std::time::Duration;
@@ -372,5 +498,67 @@ mod tests {
             .send()
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    #[ignore]
+    #[allow(unsafe_code)]
+    async fn create_table_with_ttl_enables_and_converges() {
+        unsafe {
+            env::set_var("DYNAMO_TABLE_PREFIX", "wasabi-test");
+        }
+
+        let dbd_client = DynamoClient::from_env().await.unwrap();
+        let table_name = format!("test-ttl-{}", test_run_id());
+
+        dbd_client
+            .create_table_with_ttl(&table_name, "ttl", |builder| {
+                Ok(builder
+                    .attribute_definitions(
+                        AttributeDefinition::builder()
+                            .attribute_name("PK")
+                            .attribute_type(ScalarAttributeType::S)
+                            .build()
+                            .unwrap(),
+                    )
+                    .key_schema(
+                        KeySchemaElement::builder()
+                            .attribute_name("PK")
+                            .key_type(KeyType::Hash)
+                            .build()
+                            .unwrap(),
+                    )
+                    .billing_mode(BillingMode::PayPerRequest))
+            })
+            .await
+            .unwrap();
+
+        let described = dbd_client
+            .client
+            .describe_time_to_live()
+            .table_name(dbd_client.effective_name(&table_name))
+            .send()
+            .await
+            .unwrap();
+        let description = described.time_to_live_description().unwrap();
+        // ENABLING is the normal immediate answer; the transition takes minutes.
+        assert!(matches!(
+            description.time_to_live_status(),
+            Some(TimeToLiveStatus::Enabled) | Some(TimeToLiveStatus::Enabling)
+        ));
+        assert_eq!(description.attribute_name(), Some("ttl"));
+
+        // Convergence: a second run over an existing table must be a no-op rather than the
+        // ValidationException that a blind UpdateTimeToLive would raise.
+        dbd_client
+            .ensure_time_to_live(&table_name, "ttl")
+            .await
+            .unwrap();
+
+        let _ = dbd_client
+            .client
+            .delete_table()
+            .table_name(dbd_client.effective_name(&table_name))
+            .send()
+            .await;
     }
 }
