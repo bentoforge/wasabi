@@ -36,7 +36,9 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-features -- -D warnings
+        # --workspace, or clippy lints only the root package — a thin re-export shell with no
+        # code of its own, which made this step pass on anything.
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Run tests
         run: cargo test --workspace --all-features
