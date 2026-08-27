@@ -10,6 +10,7 @@ pub mod auth;
 pub mod error;
 pub mod favicon_service;
 pub mod info_service;
+pub mod locale;
 /// PDF generation powered by Typst templates.
 #[cfg(feature = "pdf")]
 pub mod pdf;
