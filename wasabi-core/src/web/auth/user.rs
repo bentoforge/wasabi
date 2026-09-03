@@ -164,6 +164,11 @@ impl User {
     ///
     /// This uses the claim [CLAIM_LOCALE] ("locale") as defined by OpenID Connect Core 1.0,
     /// Section 5.1.
+    ///
+    /// The claim is always present: [`Authenticator`](crate::web::auth::authenticator::Authenticator)
+    /// injects one at validation time for a token that carries none — negotiated from the request's
+    /// `Accept-Language` against the configured supported languages, else the deployment default. So
+    /// this stays a single claim read while still answering in the caller's own language.
     pub fn locale(&self) -> &str {
         self.claims
             .get(CLAIM_LOCALE)

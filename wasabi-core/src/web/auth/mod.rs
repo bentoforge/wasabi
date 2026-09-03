@@ -69,13 +69,23 @@ pub fn with_user(
         .and(warp::header::optional::<String>(
             warp::http::header::AUTHORIZATION.as_str(),
         ))
+        .and(warp::header::optional::<String>(
+            warp::http::header::ACCEPT_LANGUAGE.as_str(),
+        ))
         .and(warp::query::<TokenInQueryString>())
         .and(with_cloneable(authenticator))
         .and_then(
-            |authorization: Option<String>, query_string: TokenInQueryString, authenticator| async {
-                parse_jwt_token(authorization.or(query_string.jwt), authenticator)
-                    .await
-                    .map_err(into_rejection)
+            |authorization: Option<String>,
+             accept_language: Option<String>,
+             query_string: TokenInQueryString,
+             authenticator| async {
+                parse_jwt_token(
+                    authorization.or(query_string.jwt),
+                    accept_language,
+                    authenticator,
+                )
+                .await
+                .map_err(into_rejection)
             },
         )
 }
@@ -135,6 +145,7 @@ pub fn enforce_user_with(
 #[tracing::instrument(level = "debug", skip(auth), err(Display))]
 async fn parse_jwt_token(
     bearer_token: Option<String>,
+    accept_language: Option<String>,
     auth: Arc<Authenticator>,
 ) -> anyhow::Result<User> {
     let jwt_token = if let Some(jwt_token) = bearer_token {
@@ -146,7 +157,9 @@ async fn parse_jwt_token(
         status_bail!(StatusCode::UNAUTHORIZED, "No JWT present.");
     };
 
-    let claims = auth.parse_jwt(&jwt_token).await?;
+    let claims = auth
+        .parse_jwt_localized(&jwt_token, accept_language.as_deref())
+        .await?;
     Ok(User { jwt_token, claims })
 }
 #[cfg(test)]
@@ -270,7 +283,7 @@ mod tests {
     #[tokio::test]
     async fn parse_headers_without_token_fails() {
         let authenticator = Arc::new(Authenticator::with_simple_secret("some-secret"));
-        assert!(parse_jwt_token(None, authenticator).await.is_err());
+        assert!(parse_jwt_token(None, None, authenticator).await.is_err());
     }
 
     #[tokio::test]
@@ -283,7 +296,9 @@ mod tests {
             .unwrap();
 
         let authenticator = Arc::new(Authenticator::with_simple_secret("some-secret"));
-        let user = parse_jwt_token(Some(token), authenticator).await.unwrap();
+        let user = parse_jwt_token(Some(token), None, authenticator)
+            .await
+            .unwrap();
         assert_eq!(user.tenant_id().unwrap(), "0815");
         assert_eq!(user.user_id().unwrap(), "1234");
         assert_eq!(user.full_name().unwrap(), "test");
@@ -299,7 +314,9 @@ mod tests {
             .unwrap();
 
         let authenticator = Arc::new(Authenticator::with_simple_secret("test-secret"));
-        let user = parse_jwt_token(Some(token), authenticator).await.unwrap();
+        let user = parse_jwt_token(Some(token), None, authenticator)
+            .await
+            .unwrap();
         assert_eq!(user.tenant_id().unwrap(), "21516239022");
         assert_eq!(user.user_id().unwrap(), "1234567890");
         assert_eq!(user.full_name().unwrap(), "John Doe");
@@ -316,7 +333,7 @@ mod tests {
 
         let authenticator = Arc::new(Authenticator::with_simple_secret("test-secret"));
         assert!(
-            parse_jwt_token(Some(format!("Bearer {}", token)), authenticator)
+            parse_jwt_token(Some(format!("Bearer {}", token)), None, authenticator)
                 .await
                 .is_ok()
         );
@@ -330,7 +347,7 @@ mod tests {
             .unwrap();
 
         let authenticator = Arc::new(Authenticator::with_simple_secret("wrong-secret"));
-        let err = parse_jwt_token(Some(token), authenticator)
+        let err = parse_jwt_token(Some(token), None, authenticator)
             .await
             .unwrap_err();
         let api_error = err.downcast_ref::<ApiError>().unwrap();

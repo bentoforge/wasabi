@@ -10,6 +10,7 @@ use crate::web::auth::jwks::{JwksCache, UrlJwksFetcher};
 use crate::web::auth::user::ClaimsSet;
 use crate::web::auth::{CLAIM_ISS, CLAIM_LOCALE, DEFAULT_LOCALE};
 use crate::web::error::ResultExt;
+use crate::web::locale::negotiate_language;
 use anyhow::{Context, bail};
 use async_trait::async_trait;
 use base64::Engine;
@@ -90,17 +91,42 @@ impl Authenticator {
         self.fetchers.push(fetcher);
     }
 
+    /// Sets the languages this deployment can produce, so a token carrying no `locale` claim is
+    /// answered from the request's `Accept-Language` rather than the bare default. Convenience over
+    /// [`AuthenticatorConfig::with_supported_locales`] for the common `Authenticator::from_env()?`
+    /// construction path.
+    #[must_use]
+    pub fn with_supported_locales(mut self, locales: Vec<String>) -> Self {
+        self.config = self.config.with_supported_locales(locales);
+        self
+    }
+
     /// Validates the JWT and returns the extracted claims.
     #[tracing::instrument(level = "debug", skip(self, jwt_token), err(Display))]
     pub async fn parse_jwt(&self, jwt_token: &str) -> anyhow::Result<ClaimsSet> {
+        self.parse_jwt_localized(jwt_token, None).await
+    }
+
+    /// Like [`Self::parse_jwt`], but with the request's `Accept-Language` in hand.
+    ///
+    /// It matters only when the token carries no `locale` claim: instead of blindly injecting the
+    /// deployment default, the header is negotiated against the configured supported languages (see
+    /// [`AuthenticatorConfig::with_supported_locales`]), so a caller whose token never carried a
+    /// language is still answered in one they actually asked for. With no supported set configured,
+    /// or no header, this is identical to [`Self::parse_jwt`].
+    pub async fn parse_jwt_localized(
+        &self,
+        jwt_token: &str,
+        accept_language: Option<&str>,
+    ) -> anyhow::Result<ClaimsSet> {
         let claims = Self::decode_payload(jwt_token)
             .context("Invalid JWT present")
             .with_status(StatusCode::UNAUTHORIZED)?;
 
         if let Some(config) = self.try_fetch_config(&claims).await {
-            Self::parse_validate_and_update(jwt_token, &claims, &config).await
+            Self::parse_validate_and_update(jwt_token, &claims, &config, accept_language).await
         } else {
-            Self::parse_validate_and_update(jwt_token, &claims, &self.config).await
+            Self::parse_validate_and_update(jwt_token, &claims, &self.config, accept_language).await
         }
     }
 
@@ -122,6 +148,7 @@ impl Authenticator {
         jwt_token: &str,
         claims: &ClaimsSet,
         config: &AuthenticatorConfig,
+        accept_language: Option<&str>,
     ) -> anyhow::Result<ClaimsSet> {
         let mut claims = config.check_signature(claims, jwt_token).await?;
 
@@ -133,7 +160,7 @@ impl Authenticator {
             transformer.apply(&mut claims);
         }
 
-        Self::inject_locale_if_missing(&mut claims, &config.default_locale);
+        Self::inject_locale_if_missing(&mut claims, config, accept_language);
 
         Ok(claims)
     }
@@ -162,13 +189,32 @@ impl Authenticator {
             .collect()
     }
 
-    fn inject_locale_if_missing(claims: &mut ClaimsSet, default_locale: &str) {
-        if claims.get(CLAIM_LOCALE).is_none() {
-            let _ = claims.insert(
-                CLAIM_LOCALE.to_string(),
-                Value::String(default_locale.to_string()),
-            );
+    /// Ensures a `locale` claim is present, choosing the best one available.
+    ///
+    /// A token that already names a locale keeps it. Otherwise the request's `Accept-Language` is
+    /// negotiated against the configured supported languages — so the caller is answered in a
+    /// language they asked for *and* the deployment can actually produce — and only if that finds
+    /// nothing (or no supported set was configured) does the deployment default apply. Injecting it
+    /// here, once, is what lets every downstream `User::locale()` stay a single claim read.
+    fn inject_locale_if_missing(
+        claims: &mut ClaimsSet,
+        config: &AuthenticatorConfig,
+        accept_language: Option<&str>,
+    ) {
+        if claims.get(CLAIM_LOCALE).is_some() {
+            return;
         }
+        let chosen = if config.supported_locales.is_empty() {
+            config.default_locale.clone()
+        } else {
+            let supported: Vec<&str> = config
+                .supported_locales
+                .iter()
+                .map(String::as_str)
+                .collect();
+            negotiate_language(accept_language, &supported, &config.default_locale)
+        };
+        let _ = claims.insert(CLAIM_LOCALE.to_string(), Value::String(chosen));
     }
 }
 
@@ -176,6 +222,10 @@ impl Authenticator {
 pub struct AuthenticatorConfig {
     validation: Validation,
     default_locale: String,
+    /// Languages the deployment can actually produce, for negotiating a token that carries no
+    /// `locale` claim against the request's `Accept-Language`. Empty = no negotiation (the default
+    /// locale is injected as before). Set via [`Self::with_supported_locales`].
+    supported_locales: Vec<String>,
     custom_claim_prefix: Option<String>,
     key_fetcher: KeyFetchStrategy,
     claim_transformer: Option<ClaimTransformer>,
@@ -310,10 +360,20 @@ impl AuthenticatorConfig {
         AuthenticatorConfig {
             validation,
             default_locale,
+            supported_locales: Vec::new(),
             custom_claim_prefix,
             key_fetcher: KeyFetchStrategy::Static(key_fetcher),
             claim_transformer,
         }
+    }
+
+    /// Sets the languages this deployment can produce, enabling `Accept-Language` negotiation for
+    /// tokens that carry no `locale` claim (see [`Authenticator::parse_jwt_localized`]). Order is
+    /// irrelevant; matching is by tag with primary-subtag fallback. Empty leaves negotiation off.
+    #[must_use]
+    pub fn with_supported_locales(mut self, locales: Vec<String>) -> Self {
+        self.supported_locales = locales;
+        self
     }
 
     /// Creates an authenticator configuration from environment-style string parameters.
@@ -355,6 +415,7 @@ impl AuthenticatorConfig {
         Ok(AuthenticatorConfig {
             validation,
             default_locale,
+            supported_locales: Vec::new(),
             custom_claim_prefix,
             key_fetcher,
             claim_transformer: None,
@@ -570,12 +631,27 @@ mod tests {
 
     // inject_locale_if_missing tests
 
+    /// A config with the given default and supported languages, over a throwaway HMAC key.
+    fn locale_config(default: &str, supported: &[&str]) -> AuthenticatorConfig {
+        let key = Arc::new(DecodingKey::from_secret(b"secret"));
+        AuthenticatorConfig::new(
+            None,
+            HashSet::new(),
+            None,
+            default.to_string(),
+            None,
+            Arc::new(HmacKeyFetcher::new(key)),
+            None,
+        )
+        .with_supported_locales(supported.iter().map(|s| (*s).to_string()).collect())
+    }
+
     #[test]
     fn inject_locale_adds_default_when_missing() {
         let mut claims = ClaimsSet::new();
         claims.insert("sub".to_string(), json!("user123"));
 
-        Authenticator::inject_locale_if_missing(&mut claims, "de-DE");
+        Authenticator::inject_locale_if_missing(&mut claims, &locale_config("de-DE", &[]), None);
 
         assert_eq!(claims.get(CLAIM_LOCALE).unwrap(), &json!("de-DE"));
     }
@@ -585,9 +661,35 @@ mod tests {
         let mut claims = ClaimsSet::new();
         claims.insert(CLAIM_LOCALE.to_string(), json!("fr-FR"));
 
-        Authenticator::inject_locale_if_missing(&mut claims, "de-DE");
+        Authenticator::inject_locale_if_missing(&mut claims, &locale_config("de-DE", &[]), None);
 
         assert_eq!(claims.get(CLAIM_LOCALE).unwrap(), &json!("fr-FR"));
+    }
+
+    #[test]
+    fn inject_locale_negotiates_accept_language_against_supported() {
+        let mut claims = ClaimsSet::new();
+        // Top preference `fr` is not supported; `de` (lower q) is — negotiation must pick it, not
+        // the first tag and not the default.
+        Authenticator::inject_locale_if_missing(
+            &mut claims,
+            &locale_config("en", &["de", "en"]),
+            Some("fr;q=0.9, de;q=0.8, en;q=0.7"),
+        );
+
+        assert_eq!(claims.get(CLAIM_LOCALE).unwrap(), &json!("de"));
+    }
+
+    #[test]
+    fn inject_locale_falls_back_to_default_when_nothing_matches() {
+        let mut claims = ClaimsSet::new();
+        Authenticator::inject_locale_if_missing(
+            &mut claims,
+            &locale_config("en", &["de", "en"]),
+            Some("es-ES"),
+        );
+
+        assert_eq!(claims.get(CLAIM_LOCALE).unwrap(), &json!("en"));
     }
 
     // decode_payload tests
