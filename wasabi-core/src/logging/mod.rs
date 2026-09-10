@@ -41,6 +41,7 @@
 //! | `RUST_LOG` | Console log filter (e.g., `info`, `myapp=debug`) | `info` |
 //! | `RUST_TRACE` | OpenTelemetry trace filter | `debug` |
 //! | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint URL | (required for OTel) |
+//! | `LOG_CONNECTION_ERRORS` | Keep warp's peer-disconnect connection errors | `false` |
 //!
 //! # Output Modes
 //!
@@ -66,6 +67,8 @@ mod production;
 
 #[cfg(feature = "pretty_logs")]
 mod pretty;
+
+mod noise;
 
 #[cfg(feature = "open_telemetry")]
 mod otel;
@@ -100,6 +103,7 @@ pub async fn init_tracing() {
             Registry::default()
                 .with(console_layer)
                 .with(otlp_layer)
+                .with(noise::ConnectionNoiseFilter)
                 .init();
 
             tracing::info!(
@@ -107,7 +111,10 @@ pub async fn init_tracing() {
             );
         }
         Err(err) => {
-            Registry::default().with(console_layer).init();
+            Registry::default()
+                .with(console_layer)
+                .with(noise::ConnectionNoiseFilter)
+                .init();
             tracing::info!("Tracing initialized successfully [reporting to console only]");
             tracing::info!("Skipping OpenTelemetry setup: {:#}", err);
         }
@@ -126,7 +133,10 @@ pub async fn init_tracing() {
 #[cfg(not(feature = "open_telemetry"))]
 pub async fn init_tracing() {
     let console_layer = setup_console_layer();
-    Registry::default().with(console_layer).init();
+    Registry::default()
+        .with(console_layer)
+        .with(noise::ConnectionNoiseFilter)
+        .init();
     tracing::info!("Tracing initialized successfully [reporting to console only]");
 }
 

@@ -173,6 +173,7 @@ AUTH_ISSUER=https://internal.com=secret123,https://external.com=jwks:/.well-know
 | `RUST_LOG` | Console log filter | `info` |
 | `RUST_TRACE` | OpenTelemetry trace filter | `debug` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector endpoint | (required for OTel) |
+| `LOG_CONNECTION_ERRORS` | Log connections a peer tore down (`IncompleteMessage`, resets, broken pipes), which warp reports at `ERROR` | `false` |
 
 ## Development
 
