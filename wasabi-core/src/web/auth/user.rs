@@ -105,20 +105,24 @@ impl User {
         }
     }
 
-    /// Returns the user if they have at least one of the given permissions, otherwise 401.
+    /// Returns the user if they have at least one of the given permissions, otherwise 403.
+    ///
+    /// 403 and not 401: the caller proved who they are, the token is simply not enough. A client
+    /// that cannot tell the two apart has to treat a permission gap as a dead session and sign the
+    /// user out over a button they were never allowed to press.
     #[expect(clippy::indexing_slicing, reason = "length checked to be 1")]
     pub fn enforce_any_permission(self, permissions: &[&str]) -> anyhow::Result<Self> {
         if self.has_any_permission(permissions) {
             Ok(self)
         } else if permissions.len() == 1 {
             status_bail!(
-                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
                 "The permission '{}' is required for this action",
                 permissions[0]
             );
         } else {
             status_bail!(
-                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
                 "One of the permissions '{}' is required for this action",
                 permissions.join(", ")
             );
@@ -143,13 +147,15 @@ impl User {
         eval_permission_expr(expression, |term| granted.contains(term))
     }
 
-    /// Returns the user if their permissions satisfy `expression`, otherwise 401.
+    /// Returns the user if their permissions satisfy `expression`, otherwise 403.
+    ///
+    /// See [`Self::enforce_any_permission`] for why this is not a 401.
     pub fn enforce_permission_expr(self, expression: &str) -> anyhow::Result<Self> {
         if self.has_permission_expr(expression) {
             Ok(self)
         } else {
             status_bail!(
-                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
                 "The permission expression '{}' must be satisfied for this action",
                 expression
             );
@@ -586,5 +592,33 @@ pub(crate) mod tests {
                 .to_string(),
             "One of the permissions 'permissionA, permissionB' is required for this action"
         );
+    }
+
+    #[test]
+    fn user_enforce_permission_denial_is_forbidden_not_unauthorized() {
+        let user = Builder::new()
+            .with_value(CLAIM_PERMISSIONS, json!(["permission1"]))
+            .build();
+
+        assert_eq!(
+            status_of(user.clone().enforce_any_permission(&["other"])),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_of(user.clone().enforce_any_permission(&["other", "another"])),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_of(user.enforce_permission_expr("other")),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    fn status_of(result: anyhow::Result<User>) -> StatusCode {
+        result
+            .unwrap_err()
+            .downcast_ref::<crate::web::error::ApiError>()
+            .expect("permission denial carries an ApiError")
+            .status
     }
 }
