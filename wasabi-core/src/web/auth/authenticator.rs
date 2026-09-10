@@ -102,7 +102,7 @@ impl Authenticator {
     }
 
     /// Validates the JWT and returns the extracted claims.
-    #[tracing::instrument(level = "debug", skip(self, jwt_token), err(Display))]
+    #[tracing::instrument(level = "debug", skip(self, jwt_token), err(level = "debug", Display))]
     pub async fn parse_jwt(&self, jwt_token: &str) -> anyhow::Result<ClaimsSet> {
         self.parse_jwt_localized(jwt_token, None).await
     }

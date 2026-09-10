@@ -252,7 +252,7 @@ impl S3Client {
     /// Checks if a bucket exists in S3.
     ///
     /// Returns `true` if the bucket exists, `false` if not found.
-    #[tracing::instrument(skip(self), ret, err(Display))]
+    #[tracing::instrument(skip(self), ret, err(level = "debug", Display))]
     pub async fn does_bucket_exist(&self, bucket: &BucketName) -> anyhow::Result<bool> {
         let effective_name = self.effective_name(bucket);
 
@@ -278,7 +278,7 @@ impl S3Client {
     /// Creates a bucket if it doesn't already exist.
     ///
     /// Uses the client's configured region for the bucket location.
-    #[tracing::instrument(skip(self), err(Display))]
+    #[tracing::instrument(skip(self), err(level = "debug", Display))]
     pub async fn create_bucket(&self, name: &BucketName) -> anyhow::Result<()> {
         let effective_name = self.effective_name(name);
 
@@ -333,7 +333,7 @@ impl S3Client {
     /// Idempotent: setting `Enabled`/re-applying the same lifecycle is a no-op. Once enabled,
     /// versioning cannot be turned off (only suspended), matching S3's own semantics. The two
     /// underlying calls need `s3:PutBucketVersioning` and (for retention) `s3:PutLifecycleConfiguration`.
-    #[tracing::instrument(skip(self), err(Display))]
+    #[tracing::instrument(skip(self), err(level = "debug", Display))]
     pub async fn enable_versioning(
         &self,
         bucket: &BucketName,
@@ -365,7 +365,7 @@ impl S3Client {
     }
 
     /// Applies a lifecycle rule expiring noncurrent object versions per `retention`.
-    #[tracing::instrument(skip(self), err(Display))]
+    #[tracing::instrument(skip(self), err(level = "debug", Display))]
     async fn apply_noncurrent_version_retention(
         &self,
         effective_name: &str,
@@ -412,7 +412,7 @@ impl S3Client {
     }
 
     /// Deletes an object from S3.
-    #[tracing::instrument(level = "debug", skip(self), err(Display))]
+    #[tracing::instrument(level = "debug", skip(self), err(level = "debug", Display))]
     pub async fn delete_object(&self, bucket: &BucketName, key: &str) -> anyhow::Result<()> {
         let effective_bucket = self.effective_name(bucket);
 
@@ -436,7 +436,7 @@ impl S3Client {
     /// Uploads an object to S3.
     ///
     /// For large files, consider using [`multipart_upload`](Self::multipart_upload) instead.
-    #[tracing::instrument(level = "debug", skip(self, body), err(Display))]
+    #[tracing::instrument(level = "debug", skip(self, body), err(level = "debug", Display))]
     pub async fn put_object(
         &self,
         bucket: &BucketName,
@@ -464,7 +464,7 @@ impl S3Client {
     }
 
     /// Downloads an object from S3.
-    #[tracing::instrument(level = "debug", skip(self), err(Display))]
+    #[tracing::instrument(level = "debug", skip(self), err(level = "debug", Display))]
     pub async fn get_object(&self, bucket: &BucketName, object_key: &str) -> anyhow::Result<Bytes> {
         let effective_bucket = self.effective_name(bucket);
 
@@ -500,7 +500,7 @@ impl S3Client {
     /// Uploads a large object using S3 multipart upload.
     ///
     /// Streams data in 16MB chunks. Automatically aborts the upload on failure.
-    #[tracing::instrument(level = "debug", skip(self, stream), err(Display))]
+    #[tracing::instrument(level = "debug", skip(self, stream), err(level = "debug", Display))]
     pub async fn multipart_upload(
         &self,
         bucket: &BucketName,
@@ -683,7 +683,7 @@ impl Debug for S3CachedObject {
 
 #[async_trait]
 impl CachedObject for S3CachedObject {
-    #[tracing::instrument(level = "debug", err(Display))]
+    #[tracing::instrument(level = "debug", err(level = "debug", Display))]
     async fn fetch_cached(&self) -> anyhow::Result<Arc<Vec<u8>>> {
         if let Some(content) = self.fetch_from_inner_cache().await {
             return Ok(content);
@@ -692,7 +692,7 @@ impl CachedObject for S3CachedObject {
         self.fetch().await
     }
 
-    #[tracing::instrument(level = "debug", err(Display))]
+    #[tracing::instrument(level = "debug", err(level = "debug", Display))]
     async fn fetch(&self) -> anyhow::Result<Arc<Vec<u8>>> {
         let arrival = Instant::now();
 
@@ -742,7 +742,7 @@ impl S3CachedObject {
         }
     }
 
-    #[tracing::instrument(level = "debug", err(Display))]
+    #[tracing::instrument(level = "debug", err(level = "debug", Display))]
     async fn fetch_and_cache(&self) -> anyhow::Result<Arc<Vec<u8>>> {
         let (content, next_etag) = self.perform_fetch().await;
 

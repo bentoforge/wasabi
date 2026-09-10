@@ -85,7 +85,7 @@ impl FirehoseEventRecorder {
     /// # Environment Variables
     /// - `FIREHOSE_STREAM_NAME` - Firehose delivery stream (defaults to normalized `APP_NAME`)
     /// - `FIREHOSE_SYSTEM_NAME` - System identifier in event metadata (defaults to normalized `CLUSTER_ID`)
-    #[tracing::instrument(err(Display))]
+    #[tracing::instrument(err(level = "debug", Display))]
     pub async fn from_env() -> anyhow::Result<Self> {
         // Bound the Firehose SDK independently so the timeout on
         // PutRecordBatch is enforced by both the tokio wrapper and the

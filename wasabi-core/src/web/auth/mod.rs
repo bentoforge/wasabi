@@ -142,7 +142,7 @@ pub fn enforce_user_with(
         .untuple_one()
 }
 
-#[tracing::instrument(level = "debug", skip(auth), err(Display))]
+#[tracing::instrument(level = "debug", skip(auth), err(level = "debug", Display))]
 async fn parse_jwt_token(
     bearer_token: Option<String>,
     accept_language: Option<String>,

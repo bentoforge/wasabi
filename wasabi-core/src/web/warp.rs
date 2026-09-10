@@ -307,6 +307,9 @@ pub fn into_response_with_status<S: Serialize>(
 }
 
 /// Converts an anyhow error into a warp Rejection, preserving ApiError status if present.
+///
+/// Deliberately silent: a rejection is only a failure once it becomes a response, and
+/// [`handle_rejection`] reports it there — once, and knowing the status it ends up with.
 pub fn into_rejection(err: anyhow::Error) -> Rejection {
     match err.downcast_ref::<ApiError>() {
         Some(api_error) => api_error.clone().into(),
@@ -348,9 +351,35 @@ pub fn into_rejection(err: anyhow::Error) -> Rejection {
 /// ```
 pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
     if let Some(err) = err.find::<ApiError>() {
+        report(err);
         Ok(reply::with_status(reply::json(&err), err.status))
     } else {
         Err(err)
+    }
+}
+
+/// Reports a failed request, unless the caller caused it.
+///
+/// This is the single place where a failure reaches the log, which is why services annotate their
+/// functions with `err(level = "debug", Display)`: that keeps the whole path to the failing
+/// function in the trace without every layer shouting into the container log on its way out.
+///
+/// A 4xx is the caller's problem — malformed input, an unknown entity, a missing permission — and
+/// stays on `DEBUG`, so garbage requests cannot drown the log. Everything else is ours and is
+/// reported on `ERROR`, with the full context chain [`into_rejection`] folded into the message.
+fn report(error: &ApiError) {
+    if error.status.is_client_error() {
+        tracing::debug!(
+            http.status_code = error.status.as_u16(),
+            "Rejected request: {}",
+            error.message
+        );
+    } else {
+        tracing::error!(
+            http.status_code = error.status.as_u16(),
+            "Failed to handle request: {}",
+            error.message
+        );
     }
 }
 
@@ -559,9 +588,114 @@ mod tests {
     use bytes::Bytes;
     use futures_util::StreamExt;
     use futures_util::stream;
+    use std::fmt::Debug;
     use std::str::FromStr;
+    use std::sync::{Arc, Mutex};
 
     // handle_rejection / recover_api_errors tests
+
+    /// Collects level and message of every event emitted while it is the default subscriber.
+    #[derive(Clone, Default)]
+    struct CapturedEvents(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+
+    impl CapturedEvents {
+        fn take(&self) -> Vec<(tracing::Level, String)> {
+            std::mem::take(&mut *self.0.lock().expect("poisoned"))
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CapturedEvents {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn Debug) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+
+            // warp's own filters trace at TRACE; only our own reporting is of interest here.
+            if !event.metadata().target().starts_with("wasabi_core") {
+                return;
+            }
+
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            self.0
+                .lock()
+                .expect("poisoned")
+                .push((*event.metadata().level(), message.0));
+        }
+    }
+
+    /// Runs `route` against `path` with every log event captured.
+    async fn events_of<F>(route: F, path: &str) -> (StatusCode, Vec<(tracing::Level, String)>)
+    where
+        F: Filter + Clone + Send + Sync + 'static,
+        F::Extract: Reply,
+        F::Error: Into<Rejection> + 'static,
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = CapturedEvents::default();
+        let subscriber = tracing_subscriber::registry().with(captured.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let response = warp::test::request()
+            .path(path)
+            .reply(&recover_api_errors(route))
+            .await;
+
+        (response.status(), captured.take())
+    }
+
+    #[tokio::test]
+    async fn a_server_error_is_reported_once_on_error() {
+        let route = warp::path("boom").and_then(|| async {
+            Err::<&str, Rejection>(into_rejection(
+                anyhow!("connection refused").context("Failed to read the block"),
+            ))
+        });
+
+        let (status, events) = events_of(route, "/boom").await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].0, tracing::Level::ERROR);
+        assert!(
+            events[0]
+                .1
+                .contains("Failed to read the block: connection refused"),
+            "the whole context chain belongs in the log: {}",
+            events[0].1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_error_stays_out_of_the_log() {
+        let route = warp::path("nope").and_then(|| async {
+            Err::<&str, Rejection>(into_rejection(
+                Err::<(), _>(anyhow!("Invalid date format: '2026-04-01https'"))
+                    .mark_client_error()
+                    .expect_err("marked as a client error"),
+            ))
+        });
+
+        let (status, events) = events_of(route, "/nope").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            events[0].0,
+            tracing::Level::DEBUG,
+            "garbage input must not reach the container log: {events:?}"
+        );
+    }
 
     #[tokio::test]
     async fn recover_api_errors_reports_the_api_error_status() {

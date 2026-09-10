@@ -50,7 +50,7 @@ pub struct UrlJwksFetcher {
 
 #[async_trait]
 impl JwksFetcher for UrlJwksFetcher {
-    #[tracing::instrument(level = "debug", skip(self), fields(url = %self.url), err(Display))]
+    #[tracing::instrument(level = "debug", skip(self), fields(url = %self.url), err(level = "debug", Display))]
     async fn fetch(&self) -> anyhow::Result<KeyCache> {
         // Note that we pass a custom client in here, so that our dependency "reqwest"
         // is actually marked as used. We need this dependency to activate "rustls-tls" as
@@ -127,7 +127,7 @@ impl JwksCache {
     ///
     /// Returns a cached key if available and not expired. Otherwise fetches
     /// fresh keys from the source (respecting the cooldown period).
-    #[tracing::instrument(level = "debug", skip(self), fields(key_id = %key_id), err(Display))]
+    #[tracing::instrument(level = "debug", skip(self), fields(key_id = %key_id), err(level = "debug", Display))]
     pub(crate) async fn fetch_key(&self, key_id: &str) -> anyhow::Result<Arc<DecodingKey>> {
         let mut cached_keys = self.load_keys();
         let last_load_seconds = self.compute_seconds_since_last_load();

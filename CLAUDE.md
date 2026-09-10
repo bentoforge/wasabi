@@ -66,6 +66,18 @@ All features are opt-in. Enable as needed:
 ## Key Patterns
 
 **Error Handling**: Chain context with `anyhow::Context`, convert to `ApiError` via `ResultExt::map_err_to_http()`.
+Failures are reported in exactly one place: `handle_rejection` (installed by `run_webserver`) logs a
+5xx on `ERROR` with the full context chain and a 4xx on `DEBUG`. Services must not log failures on
+their way out — that is what turns one broken request into one log line instead of five.
+
+**Tracing**: `#[tracing::instrument(level = "debug", skip(self), err(level = "debug", Display))]` on
+service and repository functions, `#[tracing::instrument(name = "GET /thing/v1", skip_all)]` on route
+handlers. Always pin `err` to `debug`: it defaults to `Level::ERROR` regardless of the span's level,
+so an unpinned `err` reports a caller's malformed request as loudly as a broken database — and does
+so once per instrumented function along the call chain. Pinned, the trace still shows exactly which
+function failed (`RUST_TRACE=debug`) while the container log stays quiet unless something is really
+broken — `handle_rejection` still reports every 5xx. Only boot and setup code (`with_client`,
+`from_env`, `install`) belongs on `info`.
 
 **Async**: Everything is async/await with Tokio runtime. Use `#[tokio::test]` for async tests.
 
