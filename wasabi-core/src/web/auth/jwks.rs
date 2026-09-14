@@ -173,7 +173,12 @@ impl JwksCache {
             if let Some(key) = keys.get(key_id) {
                 Ok(key.clone())
             } else {
-                tracing::warn!(
+                // Only reachable with freshly fetched keys: an unknown kid clears the cache
+                // above, and a cleared cache either refetches or leaves through the 503 below.
+                // So this is a caller presenting a kid the issuer does not have — their
+                // problem, answered with a 401, and not something the container log needs to
+                // carry. Left on debug it cannot be used to flood the log either.
+                tracing::debug!(
                     key_id,
                     cached_kids = ?keys.keys().collect::<Vec<_>>(),
                     last_load_seconds,
@@ -293,16 +298,50 @@ mod tests {
         assert!(message.contains("Name or service not known"), "{message}");
     }
 
+    /// Collects the level of every event this crate emits while it is the default subscriber.
+    #[derive(Clone, Default)]
+    struct LevelSpy(Arc<std::sync::Mutex<Vec<tracing::Level>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for LevelSpy {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target().starts_with("wasabi_core") {
+                self.0
+                    .lock()
+                    .expect("poisoned")
+                    .push(*event.metadata().level());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn unknown_key_stays_the_callers_problem() {
+        use tracing_subscriber::layer::SubscriberExt;
+
         let mut keys = KeyCache::new();
         keys.insert("key-1".to_string(), create_test_key());
 
         let cache = JwksCache::new(Box::new(MockJwksFetcher::new(keys)));
 
+        let levels = LevelSpy::default();
+        let subscriber = tracing_subscriber::registry().with(levels.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+
         let err = cache.fetch_key("unknown-key").await.unwrap_err();
 
+        drop(guard);
         assert_eq!(status_of(&err), StatusCode::UNAUTHORIZED);
+
+        // Anyone can send a token with an invented kid, so reporting it must not be a way to
+        // fill the container log.
+        let levels = levels.0.lock().expect("poisoned");
+        assert!(
+            !levels.iter().any(|level| *level <= tracing::Level::WARN),
+            "a caller's invented kid must stay out of the log, got: {levels:?}"
+        );
     }
 
     #[tokio::test]
