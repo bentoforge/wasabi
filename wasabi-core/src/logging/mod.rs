@@ -38,7 +38,7 @@
 //!
 //! | Variable | Description | Default |
 //! |----------|-------------|---------|
-//! | `RUST_LOG` | Console log filter (e.g., `info`, `myapp=debug`) | `info` |
+//! | `RUST_LOG` | Console log filter (e.g., `info`, `myapp=debug`) | `info`, minus warp's per-request events |
 //! | `RUST_TRACE` | OpenTelemetry trace filter | `debug` |
 //! | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint URL | (required for OTel) |
 //! | `LOG_CONNECTION_ERRORS` | Keep warp's peer-disconnect connection errors | `false` |
@@ -140,13 +140,26 @@ pub async fn init_tracing() {
     tracing::info!("Tracing initialized successfully [reporting to console only]");
 }
 
+/// Console filter used when `RUST_LOG` says nothing: `info`, minus warp's per-request events.
+///
+/// `warp::trace` logs two INFO events per request — "processing request" and "finished processing
+/// with success" — so a service behind a load balancer writes a container log that is almost
+/// entirely health checks: an ALB spanning three availability zones, probing every 30 seconds,
+/// produces roughly 35k lines a day per task before a single real request is served. The request
+/// is already a span in the trace, which is where that detail belongs.
+///
+/// Only the fallback changes: a deployment that sets `RUST_LOG` keeps full control, including
+/// turning the events back on with `warp::filters::trace=info`.
+const DEFAULT_CONSOLE_FILTER: &str = "info,warp::filters::trace=error";
+
 /// Creates the console output layer with appropriate formatting.
 ///
-/// Uses `RUST_LOG` environment variable for filtering, defaulting to `info`.
-/// Format depends on whether `pretty_logs` feature is enabled.
+/// Uses the `RUST_LOG` environment variable for filtering, falling back to
+/// [`DEFAULT_CONSOLE_FILTER`]. Format depends on whether `pretty_logs` is enabled.
 #[cfg(feature = "pretty_logs")]
 fn setup_console_layer() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_CONSOLE_FILTER));
 
     tracing_subscriber::fmt::layer()
         .with_span_events(FmtSpan::NEW)
@@ -158,7 +171,8 @@ fn setup_console_layer() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
 /// Creates the console output layer for production (no ANSI, with span context).
 #[cfg(not(feature = "pretty_logs"))]
 fn setup_console_layer() -> Box<dyn Layer<Registry> + Send + Sync + 'static> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_CONSOLE_FILTER));
 
     tracing_subscriber::fmt::layer()
         .with_ansi(false)
@@ -175,4 +189,19 @@ fn setup_console_format() -> pretty::PrettyConsoleLogFormat {
 #[cfg(not(feature = "pretty_logs"))]
 fn setup_console_format() -> production::ProductionLogFormat {
     production::ProductionLogFormat
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A typo in the fallback would only show up as a flood of health-check lines in production.
+    #[test]
+    fn the_default_console_filter_parses() {
+        let filter = tracing_subscriber::filter::EnvFilter::builder()
+            .parse(DEFAULT_CONSOLE_FILTER)
+            .expect("the default console filter must be a valid directive list");
+
+        assert!(filter.to_string().contains("warp::filters::trace=error"));
+    }
 }
