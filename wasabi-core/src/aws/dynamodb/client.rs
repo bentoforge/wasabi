@@ -6,7 +6,7 @@
 
 use anyhow::Context;
 use aws_sdk_dynamodb::Client;
-use aws_sdk_dynamodb::error::BuildError;
+use aws_sdk_dynamodb::error::{BuildError, ProvideErrorMetadata, SdkError};
 use aws_sdk_dynamodb::operation::create_table::builders::CreateTableFluentBuilder;
 use aws_sdk_dynamodb::operation::delete_item::builders::DeleteItemFluentBuilder;
 use aws_sdk_dynamodb::operation::get_item::builders::GetItemFluentBuilder;
@@ -19,8 +19,89 @@ use aws_sdk_dynamodb::types::{
 use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
+use std::error::Error;
+use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;
+
+/// How often a throttled control-plane call is re-tried, and the first wait between tries (it
+/// doubles from there).
+///
+/// `DescribeTimeToLive` and `UpdateTimeToLive` draw on DynamoDB's control-plane budget, which is
+/// small and account-wide rather than per-table. A service that provisions a dozen tables issues
+/// its whole burst within a second, and a second task booting alongside it doubles that, so the
+/// tail of the burst is throttled routinely while nothing at all is wrong. The SDK's own retries
+/// are spent well inside that window; these outlast it.
+const THROTTLE_RETRIES: u32 = 4;
+const THROTTLE_BACKOFF: Duration = Duration::from_millis(500);
+
+/// Whether a failed call was throttled rather than refused.
+///
+/// Throttling is not a modelled variant of these operations, so it arrives as an unhandled error
+/// and only the wire error code tells it apart from a denial. The spelling varies by service and
+/// has changed over time, hence the list.
+fn is_throttled(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some(
+            "ThrottlingException"
+                | "ThrottlingError"
+                | "Throttling"
+                | "LimitExceededException"
+                | "RequestLimitExceeded"
+                | "TooManyRequestsException"
+        )
+    )
+}
+
+/// Renders an error with its whole source chain.
+///
+/// An `SdkError`'s own `Display` is the bare kind — "service error" — while everything that names
+/// the failure sits in `source()`. Logging only the former turns "we are being throttled" and "we
+/// are not allowed to do this" into the same line, which is how an afternoon gets spent reading
+/// CloudTrail to recover what the log already had in hand.
+fn error_chain(err: &(dyn Error + 'static)) -> String {
+    let mut rendered = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        rendered.push_str(": ");
+        rendered.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    rendered
+}
+
+/// Runs a control-plane call, re-trying while DynamoDB throttles it.
+async fn while_throttled<T, E, R, F, Fut>(what: &str, mut call: F) -> Result<T, SdkError<E, R>>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, SdkError<E, R>>>,
+    E: ProvideErrorMetadata,
+{
+    let mut attempt = 1;
+    let mut backoff = THROTTLE_BACKOFF;
+
+    loop {
+        let err = match call().await {
+            Ok(value) => return Ok(value),
+            Err(err) => err,
+        };
+
+        if attempt >= THROTTLE_RETRIES || !is_throttled(err.code()) {
+            return Err(err);
+        }
+
+        tracing::debug!(
+            attempt,
+            backoff_ms = backoff.as_millis(),
+            "{} was throttled, retrying",
+            what
+        );
+        sleep(backoff).await;
+        backoff *= 2;
+        attempt += 1;
+    }
+}
 
 /// DynamoDB client with automatic table name prefixing.
 ///
@@ -197,6 +278,11 @@ impl DynamoClient {
     /// `ValidationException`, and the call is rate-limited per table, so blindly re-issuing it on
     /// every boot would eventually start failing.
     ///
+    /// Both calls are re-tried while DynamoDB throttles them (see [`THROTTLE_RETRIES`]). A service
+    /// with a dozen tables provisions them in one burst, so the tail of that burst is throttled
+    /// routinely — and giving up there means the table quietly never gets its TTL, with a warning
+    /// as the only trace.
+    ///
     /// **Never fatal.** A missing `dynamodb:UpdateTimeToLive` permission would otherwise take a
     /// whole service down on upgrade over housekeeping — including deployments whose IAM policy
     /// predates this call. Failures are logged at WARN with the manual remedy, and the table simply
@@ -204,12 +290,13 @@ impl DynamoClient {
     pub async fn ensure_time_to_live(&self, name: &str, attribute: &str) -> anyhow::Result<()> {
         let effective_name = self.effective_name(name);
 
-        let described = match self
-            .client
-            .describe_time_to_live()
-            .table_name(&effective_name)
-            .send()
-            .await
+        let described = match while_throttled("DescribeTimeToLive", || {
+            self.client
+                .describe_time_to_live()
+                .table_name(&effective_name)
+                .send()
+        })
+        .await
         {
             Ok(described) => described,
             Err(err) => {
@@ -218,7 +305,7 @@ impl DynamoClient {
                      update-time-to-live --table-name {} --time-to-live-specification \
                      'Enabled=true,AttributeName={}'",
                     effective_name,
-                    err,
+                    error_chain(&err),
                     effective_name,
                     attribute
                 );
@@ -259,13 +346,14 @@ impl DynamoClient {
                 format!("Failed to build a TTL specification for '{effective_name}'")
             })?;
 
-        match self
-            .client
-            .update_time_to_live()
-            .table_name(&effective_name)
-            .time_to_live_specification(specification)
-            .send()
-            .await
+        match while_throttled("UpdateTimeToLive", || {
+            self.client
+                .update_time_to_live()
+                .table_name(&effective_name)
+                .time_to_live_specification(specification.clone())
+                .send()
+        })
+        .await
         {
             Ok(_) => {
                 tracing::info!(
@@ -280,7 +368,7 @@ impl DynamoClient {
                      aws dynamodb update-time-to-live --table-name {} --time-to-live-specification \
                      'Enabled=true,AttributeName={}'",
                     effective_name,
-                    err,
+                    error_chain(&err),
                     effective_name,
                     attribute
                 );
@@ -397,7 +485,7 @@ impl ItemBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::aws::dynamodb::client::DynamoClient;
+    use crate::aws::dynamodb::client::{DynamoClient, error_chain, is_throttled};
     use crate::aws::test::test_run_id;
     use aws_sdk_dynamodb::types::{
         AttributeDefinition, BillingMode, KeySchemaElement, KeyType, ScalarAttributeType,
@@ -560,5 +648,47 @@ mod tests {
             .table_name(dbd_client.effective_name(&table_name))
             .send()
             .await;
+    }
+
+    #[test]
+    fn throttling_is_told_apart_from_a_denial() {
+        assert!(is_throttled(Some("ThrottlingException")));
+        assert!(is_throttled(Some("LimitExceededException")));
+        // The one that matters: a missing permission must never look retryable, or a boot would
+        // spend its backoff budget on a call that can only ever fail.
+        assert!(!is_throttled(Some("AccessDeniedException")));
+        assert!(!is_throttled(Some("ResourceNotFoundException")));
+        assert!(!is_throttled(None));
+    }
+
+    #[test]
+    fn error_chain_renders_the_cause_the_outer_error_hides() {
+        #[derive(Debug)]
+        struct Outer(Inner);
+        #[derive(Debug)]
+        struct Inner;
+
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                // Exactly what SdkError does: a kind, with the diagnosis only in `source()`.
+                write!(f, "service error")
+            }
+        }
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "ThrottlingException: Rate exceeded")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        impl std::error::Error for Inner {}
+
+        assert_eq!(
+            error_chain(&Outer(Inner)),
+            "service error: ThrottlingException: Rate exceeded"
+        );
     }
 }
