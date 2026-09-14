@@ -70,6 +70,14 @@ Failures are reported in exactly one place: `handle_rejection` (installed by `ru
 5xx on `ERROR` with the full context chain and a 4xx on `DEBUG`. Services must not log failures on
 their way out — that is what turns one broken request into one log line instead of five.
 
+Because the level follows the status, **the status is the only thing keeping an outage visible**. A
+failure that is ours — a dependency unreachable, a store down — must not be answered with a 4xx: it
+would be logged on `DEBUG` like a typo in a request body, and a `401` in particular ends the
+caller's session over something they cannot fix. Classify where the call is actually made, and use
+`ResultExt::with_default_status` rather than `with_status` in a layer that cannot tell the two
+apart — `into_rejection` reads the outermost `ApiError`, so a blanket `with_status` silently
+overrules the verdict of the layer that knew.
+
 **Tracing**: `#[tracing::instrument(level = "debug", skip(self), err(level = "debug", Display))]` on
 service and repository functions, `#[tracing::instrument(name = "GET /thing/v1", skip_all)]` on route
 handlers. Always pin `err` to `debug`: it defaults to `Level::ERROR` regardless of the span's level,

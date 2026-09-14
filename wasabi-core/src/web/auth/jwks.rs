@@ -4,7 +4,9 @@
 //! the JWKS endpoint on key rotation. See `MAX_CACHE_TTL_SECONDS` and
 //! `MIN_WAIT_BETWEEN_LOADS_SECONDS` for the actual values.
 
-use anyhow::{Context, bail};
+use crate::status_bail;
+use crate::web::error::ResultExt;
+use anyhow::Context;
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use jsonwebtoken::DecodingKey;
@@ -12,6 +14,7 @@ use jwks::Jwks;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use warp::http::StatusCode;
 
 #[cfg(test)]
 use mock_instant::global::SystemTime;
@@ -60,7 +63,8 @@ impl JwksFetcher for UrlJwksFetcher {
         // provider cannot hang the request handler indefinitely.
         let jwks = Jwks::from_jwks_url_with_client(&self.client, &self.url)
             .await
-            .with_context(|| format!("Failed to fetch JWKS from: {}", self.url))?;
+            .with_context(|| format!("Failed to fetch JWKS from: {}", self.url))
+            .with_status(StatusCode::SERVICE_UNAVAILABLE)?;
 
         let keys = jwks
             .keys
@@ -112,6 +116,10 @@ pub(crate) struct JwksCache {
     fetcher: Box<dyn JwksFetcher>,
     last_load: ArcSwapOption<SystemTime>,
     cached_keys: ArcSwapOption<KeyCache>,
+    /// Why the last fetch failed, so the requests the cooldown turns away can name the cause
+    /// instead of reporting an empty cache. Without it, a fetch that fails once per cooldown
+    /// window explains itself once while every request in between logs a reason-free line.
+    last_error: ArcSwapOption<String>,
 }
 impl JwksCache {
     /// Creates a new cache with the given fetcher.
@@ -120,6 +128,7 @@ impl JwksCache {
             fetcher,
             last_load: ArcSwapOption::new(None),
             cached_keys: ArcSwapOption::new(None),
+            last_error: ArcSwapOption::new(None),
         }
     }
 
@@ -151,13 +160,13 @@ impl JwksCache {
                 "refetching JWKS"
             );
             self.last_load.store(Some(Arc::new(SystemTime::now())));
-            let keys = self
-                .fetcher
-                .fetch()
-                .await
-                .inspect_err(|_| self.cached_keys.store(None))?;
+            let keys = self.fetcher.fetch().await.inspect_err(|err| {
+                self.cached_keys.store(None);
+                self.last_error.store(Some(Arc::new(format!("{:#}", err))));
+            })?;
             cached_keys = Some(Arc::new(keys));
             self.cached_keys.store(cached_keys.clone());
+            self.last_error.store(None);
         }
 
         if let Some(keys) = cached_keys {
@@ -170,15 +179,18 @@ impl JwksCache {
                     last_load_seconds,
                     "JWT uses unknown kid — rejecting"
                 );
-                bail!("Unknown JWKS key: {}", key_id);
+                status_bail!(StatusCode::UNAUTHORIZED, "Unknown JWKS key: {}", key_id);
             }
         } else {
-            tracing::warn!(
-                key_id,
-                last_load_seconds,
-                "JWKS cache empty and refetch blocked by cooldown"
-            );
-            bail!("JWKS not loaded or empty");
+            match self.last_error.load_full() {
+                Some(reason) => status_bail!(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "JWKS unavailable, retrying in at most {}s: {}",
+                    MIN_WAIT_BETWEEN_LOADS_SECONDS,
+                    reason
+                ),
+                None => status_bail!(StatusCode::SERVICE_UNAVAILABLE, "JWKS not loaded or empty"),
+            }
         }
     }
 
@@ -199,8 +211,30 @@ impl JwksCache {
 mod tests {
     use super::*;
 
+    use crate::web::error::ApiError;
+
     struct MockJwksFetcher {
         keys: KeyCache,
+    }
+
+    /// A fetcher that fails the way an unreachable endpoint does: with the status the real
+    /// `UrlJwksFetcher` attaches, so the tests below exercise the classification, not a mock's
+    /// own idea of it.
+    struct UnreachableJwksFetcher;
+
+    #[async_trait]
+    impl JwksFetcher for UnreachableJwksFetcher {
+        async fn fetch(&self) -> anyhow::Result<KeyCache> {
+            Err(anyhow::anyhow!("dns error: Name or service not known"))
+                .context("Failed to fetch JWKS from: https://iam.example.com/.well-known/jwks.json")
+                .with_status(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
+
+    fn status_of(err: &anyhow::Error) -> StatusCode {
+        err.downcast_ref::<ApiError>()
+            .map(|api_error| api_error.status)
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
     }
 
     impl MockJwksFetcher {
@@ -231,6 +265,44 @@ mod tests {
         let result = cache.fetch_key("key-1").await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn unreachable_endpoint_is_reported_as_service_unavailable() {
+        // The whole point: a `4xx` here would put the outage on DEBUG at the rejection boundary
+        // and end every caller's session over a DNS failure.
+        let cache = JwksCache::new(Box::new(UnreachableJwksFetcher));
+
+        let err = cache.fetch_key("key-1").await.unwrap_err();
+
+        assert_eq!(status_of(&err), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn requests_blocked_by_the_cooldown_still_name_the_cause() {
+        let cache = JwksCache::new(Box::new(UnreachableJwksFetcher));
+
+        cache.fetch_key("key-1").await.unwrap_err();
+        // Second call inside the cooldown window: no fetch happens, so the reason has to come
+        // from the remembered failure rather than from a bare "cache empty".
+        let err = cache.fetch_key("key-1").await.unwrap_err();
+
+        assert_eq!(status_of(&err), StatusCode::SERVICE_UNAVAILABLE);
+        let message = format!("{:#}", err);
+        assert!(message.contains("iam.example.com"), "{message}");
+        assert!(message.contains("Name or service not known"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn unknown_key_stays_the_callers_problem() {
+        let mut keys = KeyCache::new();
+        keys.insert("key-1".to_string(), create_test_key());
+
+        let cache = JwksCache::new(Box::new(MockJwksFetcher::new(keys)));
+
+        let err = cache.fetch_key("unknown-key").await.unwrap_err();
+
+        assert_eq!(status_of(&err), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

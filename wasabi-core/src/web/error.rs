@@ -64,6 +64,15 @@ pub trait ResultExt<T> {
     /// Wraps the error with an [`ApiError`] carrying the given status code.
     fn with_status(self, status: StatusCode) -> Result<T, anyhow::Error>;
 
+    /// Attaches `status`, but only if the chain does not already carry an [`ApiError`].
+    ///
+    /// For a layer that cannot tell the two apart: a JWT that fails to validate is the caller's
+    /// problem, an unreachable JWKS endpoint is ours, and only the layer that actually made the
+    /// call knows which happened. [`Self::with_status`] would relabel the verdict from below --
+    /// `into_rejection` reads the outermost [`ApiError`] in the chain -- and an infrastructure
+    /// outage answered as `401` both hides itself from the log and ends the caller's session.
+    fn with_default_status(self, status: StatusCode) -> Result<T, anyhow::Error>;
+
     /// Convenience method for `with_status(StatusCode::BAD_REQUEST)`.
     fn mark_client_error(self) -> Result<T, anyhow::Error>;
 }
@@ -80,6 +89,14 @@ impl<T> ResultExt<T> for Result<T, anyhow::Error> {
                     code: None,
                 }))
             }
+        }
+    }
+
+    fn with_default_status(self, status: StatusCode) -> Result<T, anyhow::Error> {
+        match self {
+            Ok(t) => Ok(t),
+            Err(err) if err.downcast_ref::<ApiError>().is_some() => Err(err),
+            Err(err) => Err(err).with_status(status),
         }
     }
 
@@ -108,4 +125,36 @@ macro_rules! status_bail {
     ($status:expr, $fmt:literal, $($arg:tt)*) => {
         return $crate::web::error::ResultExt::with_status(Err(::anyhow::anyhow!($fmt, $($arg)*)), $status)
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Context;
+
+    #[test]
+    fn with_default_status_applies_when_no_status_was_classified() {
+        let err = Err::<(), _>(anyhow::anyhow!("boom"))
+            .with_default_status(StatusCode::UNAUTHORIZED)
+            .unwrap_err();
+
+        assert_eq!(
+            err.downcast_ref::<ApiError>().map(|api| api.status),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn with_default_status_keeps_the_verdict_of_the_layer_below() {
+        let err = Err::<(), _>(anyhow::anyhow!("dns error"))
+            .with_status(StatusCode::SERVICE_UNAVAILABLE)
+            .context("Failed to fetch JWKS")
+            .with_default_status(StatusCode::UNAUTHORIZED)
+            .unwrap_err();
+
+        assert_eq!(
+            err.downcast_ref::<ApiError>().map(|api| api.status),
+            Some(StatusCode::SERVICE_UNAVAILABLE)
+        );
+    }
 }

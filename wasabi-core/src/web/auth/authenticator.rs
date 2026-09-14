@@ -312,7 +312,7 @@ impl KeyFetcher for JwksFetcher {
         if let Some(kid) = &header.kid {
             self.jwks_cache.fetch_key(kid).await
         } else {
-            Err(anyhow::anyhow!("No kid present in JWT header"))
+            status_bail!(StatusCode::UNAUTHORIZED, "No kid present in JWT header")
         }
     }
 }
@@ -571,10 +571,14 @@ impl AuthenticatorConfig {
             }
         };
 
+        // Not `with_status`: a [`KeyFetcher`] that could not reach its JWKS endpoint at all has
+        // already classified that as a `503`, and overwriting it with `401` would both silence the
+        // outage in the log and sign every caller out over an infrastructure failure. Only the
+        // fetchers that have no such distinction to make fall through to the default.
         let decoding_key = key_fetcher
             .fetch(&header)
             .await
-            .with_status(StatusCode::UNAUTHORIZED)?;
+            .with_default_status(StatusCode::UNAUTHORIZED)?;
         self.validate_signature(&header, &decoding_key, jwt_token)
     }
 
