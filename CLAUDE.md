@@ -39,6 +39,7 @@ All features are opt-in. Enable as needed:
 - `aws_dynamodb` - DynamoDB integration
 - `aws_firehose` - AWS Firehose event recording
 - `aws_bedrock` - AWS Bedrock AI integration
+- `aws_ses` - Outbound mail via AWS SES (`aws::ses::Mailer`)
 - `open_search` - AWS OpenSearch integration
 
 ## Architecture

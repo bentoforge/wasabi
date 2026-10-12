@@ -25,7 +25,7 @@
 //!
 //! - [`logging`] - Tracing setup with optional OpenTelemetry export
 //! - [`web`] - HTTP server, JWT authentication, request/response utilities
-//! - [`aws`] - AWS service integrations (S3, DynamoDB, Bedrock)
+//! - [`aws`] - AWS service integrations (S3, DynamoDB, Bedrock, SES)
 //! - [`events`] - Event recording with Firehose batching
 //! - [`tools`] - Utilities (ID generation, i18n strings, graceful shutdown)
 //! - [`opensearch`] - OpenSearch/Elasticsearch client (feature-gated)
@@ -40,6 +40,7 @@
 //! - `aws_dynamodb` - DynamoDB integration
 //! - `aws_firehose` - Firehose event streaming
 //! - `aws_bedrock` - Bedrock AI model integration
+//! - `aws_ses` - Outbound mail via SES
 //! - `open_search` - OpenSearch client
 //!
 //! ## Environment Variables

@@ -66,6 +66,7 @@ All integrations are opt-in to keep compile times fast. Enable only what you nee
 | `aws_dynamodb` | DynamoDB client with table prefix support | `aws-sdk-dynamodb`, `serde_dynamo` |
 | `aws_firehose` | Event streaming to Kinesis Firehose | `aws-sdk-firehose` |
 | `aws_bedrock` | AI model integration with SSE streaming | `aws-sdk-bedrockruntime` |
+| `aws_ses` | Outbound mail (text, HTML, attachments) via SES | `aws-sdk-sesv2` |
 | `open_search` | OpenSearch/Elasticsearch client | `opensearch` |
 
 Example with multiple features:
@@ -90,6 +91,7 @@ Built on [Warp](https://github.com/seanmonstar/warp) with additional filters:
 - **S3** - Bucket naming with suffix support, `CachedObject` trait for ETag-based caching
 - **DynamoDB** - Table prefix support, schema helpers, pagination utilities
 - **Bedrock** - Streaming AI responses as Server-Sent Events
+- **SES** - `Mailer` sending text/HTML mails with attachments; disabled unless `MAIL_SES_FROM` is set
 
 ### Events (`wasabi::events`)
 
@@ -163,6 +165,9 @@ AUTH_ISSUER=https://internal.com=secret123,https://external.com=jwks:/.well-know
 | Variable | Description |
 |----------|-------------|
 | `S3_BUCKET_SUFFIX` | Suffix for bucket names (e.g., `prod.example.com`) |
+| `MAIL_TRANSPORT` | `ses`, `log` or `none` (default: `ses` if `MAIL_SES_FROM` is set, else `none`) |
+| `MAIL_SES_FROM` | Mail sender, e.g. `Example <no-reply@example.com>` |
+| `MAIL_SES_CONFIGURATION_SET` | Optional SES configuration set |
 | `DYNAMO_TABLE_PREFIX` | Prefix for table names (e.g., `myapp-prod`) |
 | `FIREHOSE_STREAM_NAME` | Firehose delivery stream name |
 
