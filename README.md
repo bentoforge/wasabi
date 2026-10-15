@@ -68,6 +68,7 @@ All integrations are opt-in to keep compile times fast. Enable only what you nee
 | `aws_bedrock` | AI model integration with SSE streaming | `aws-sdk-bedrockruntime` |
 | `aws_ses` | Outbound mail (text, HTML, attachments) via SES | `aws-sdk-sesv2` |
 | `open_search` | OpenSearch/Elasticsearch client | `opensearch` |
+| `postgres` | PostgreSQL pool, records and declarative table schemas | `tokio-postgres`, `deadpool-postgres`, `sea-query` |
 
 Example with multiple features:
 
@@ -92,6 +93,24 @@ Built on [Warp](https://github.com/seanmonstar/warp) with additional filters:
 - **DynamoDB** - Table prefix support, schema helpers, pagination utilities
 - **Bedrock** - Streaming AI responses as Server-Sent Events
 - **SES** - `Mailer` sending text/HTML mails with attachments; disabled unless `MAIL_SES_FROM` is set
+
+### PostgreSQL (`wasabi::postgres`)
+
+- **`Database`** - pooled connections (`POSTGRES_URL`), TLS via rustls; `client()` hands out a plain `tokio-postgres` client for any SQL
+- **`Record` + `Table`** - `insert`, `insert_if_absent`, `upsert`, `update(values, filter)`, `delete`, `select` by column name, built and bound by `sea-query`
+- **Column types** - text/varchar, boolean, the integers, real/double, `Decimal(p, s)` / `Numeric` (exact `NUMERIC`, bound as `postgres::Decimal` from `rust_decimal` — use these for money, never double), timestamps, date, bytea, json/jsonb
+- **Errors** - every operation returns `postgres::Result`; `postgres::Error` classifies what a caller can react to (`UniqueViolation`, `ForeignKeyViolation`, `Retryable`) and passes everything else as `Other`. `?` into `anyhow::Result` works as usual, and `Error::find` recovers the variant from an anyhow chain. `postgres::retry(async || …)` re-runs an operation up to twice on a duplicate key or a lost serialization race
+- **Schema diff** - a `Table` declares columns, primary key and indices; `schema_changes()` lists what differs as `SchemaChange { label, sql, data_loss_expected }`, `ensure_exists()` applies everything that cannot lose data and withholds the rest
+
+```rust
+let users = Table::new("users")
+    .column(Column::new("id", ColumnType::Text))
+    .column(Column::new("email", ColumnType::Text).not_null())
+    .primary_key(["id"])
+    .index(Index::new("by_email", ["email"]).unique());
+db.ensure_exists(&users).await?;
+users.update(&db.client().await?, record! { "email" => "b@example.com" }, record! { "id" => "0815" }).await?;
+```
 
 ### Events (`wasabi::events`)
 
@@ -170,6 +189,16 @@ AUTH_ISSUER=https://internal.com=secret123,https://external.com=jwks:/.well-know
 | `MAIL_SES_CONFIGURATION_SET` | Optional SES configuration set |
 | `DYNAMO_TABLE_PREFIX` | Prefix for table names (e.g., `myapp-prod`) |
 | `FIREHOSE_STREAM_NAME` | Firehose delivery stream name |
+
+### PostgreSQL
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `POSTGRES_URL` | Connection string, e.g. `postgres://user:pass@host:5432/db?sslmode=require` | (required) |
+| `POSTGRES_POOL_SIZE` | Maximum pooled connections | `16` |
+| `POSTGRES_CA_FILE` | PEM bundle of extra trusted CAs — RDS needs Amazon's bundle | (none) |
+
+Integration tests run against `POSTGRES_TEST_URL` and are skipped when it is unset.
 
 ### Observability
 

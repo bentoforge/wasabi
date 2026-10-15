@@ -41,6 +41,7 @@ All features are opt-in. Enable as needed:
 - `aws_bedrock` - AWS Bedrock AI integration
 - `aws_ses` - Outbound mail via AWS SES (`aws::ses::Mailer`)
 - `open_search` - AWS OpenSearch integration
+- `postgres` - PostgreSQL pool, `Record`/`Table` access and declarative schema diff (`postgres::Database`)
 
 ## Architecture
 
@@ -59,6 +60,13 @@ All features are opt-in. Enable as needed:
 ### Observability (`wasabi-core/src/logging/`)
 - Tracing with optional OpenTelemetry export
 - `pretty.rs` - Development-friendly console output
+
+### PostgreSQL (`wasabi-core/src/postgres/`)
+- `mod.rs` - `Database` (deadpool pool, rustls/aws-lc-rs TLS), `ensure_exists` / `apply` under an advisory lock
+- `table.rs` - `Table`/`Column`/`Index` declarations and record CRUD via `sea-query`
+- `schema.rs` - catalog introspection and the diff into `SchemaChange`s
+- `error.rs` - `postgres::Error` (classified driver errors, `Other(anyhow)` for the rest) and `retry`
+- Integration tests need `POSTGRES_TEST_URL` (e.g. a `postgres:17` container) and skip without it
 
 ### Events (`wasabi-core/src/events/`)
 - `Event` trait (derived via macro) for custom event types

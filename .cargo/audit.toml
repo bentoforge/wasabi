@@ -33,4 +33,13 @@ ignore = [
     # typst-library / rustybuzz (font parsing). No active CVE; re-evaluate
     # when typst migrates off it.
     "RUSTSEC-2026-0192",
+    # rkyv 0.7.46 — out-of-bounds read via Rc/Arc archives. An optional
+    # dependency of rust_decimal (pulled in by the `postgres` feature for
+    # NUMERIC columns) behind rust_decimal's `rkyv` feature, which nothing
+    # enables: `cargo tree --all-features --target all -i rkyv` prints
+    # nothing, so it is never compiled. It lands in Cargo.lock only through
+    # rust_decimal's weak `rkyv?/std` feature. rust_decimal 1.42.1 pins
+    # rkyv ^0.7.46, incompatible with the fixed 0.8.17; drop this ignore
+    # once rust_decimal references rkyv >= 0.8.17.
+    "RUSTSEC-2026-0235",
 ]

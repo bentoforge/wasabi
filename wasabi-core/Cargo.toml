@@ -60,6 +60,20 @@ typst-kit = { version = "0.15", features = ["embedded-fonts"], optional = true }
 fast_qr = { version = "0.13", features = ["svg"], optional = true }
 rxing = { version = "0.9", default-features = false, features = ["image", "image_formats", "encoding_rs", "encoders", "oned"], optional = true }
 thiserror = { version = "2.0", optional = true }
+# Postgres: the driver plus a pool; sea-query builds and binds statements so `postgres::Table`
+# only owns the schema diff.
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1"], optional = true }
+deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"], optional = true }
+tokio-postgres-rustls = { version = "0.14", features = ["aws-lc-rs"], optional = true }
+# TLS for Postgres goes through rustls with the aws-lc-rs provider, same as jsonwebtoken/jwks,
+# so the tree keeps one crypto backend.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"], optional = true }
+sea-query = { version = "1", default-features = false, features = ["backend-postgres", "with-chrono", "with-json", "with-rust_decimal"], optional = true }
+sea-query-postgres = { version = "0.6", features = ["with-chrono", "with-json", "with-rust_decimal"], optional = true }
+# Exact decimals for NUMERIC columns (money, limits) — never f64. Re-exported as
+# `postgres::Decimal`, so a service binds the very type the driver encodes.
+rust_decimal = { version = "1.37", features = ["db-postgres"], optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
 
 [dev-dependencies]
 mock_instant = "0.6"
@@ -76,3 +90,4 @@ aws_bedrock = ["aws-config", "aws-sdk-bedrockruntime", "aws-smithy-types"]
 aws_ses = ["aws-config", "aws-sdk-sesv2"]
 open_search = ["opensearch"]
 pdf = ["typst", "typst-layout", "typst-pdf", "typst-kit", "fast_qr", "rxing", "thiserror", "reqwest/blocking"]
+postgres = ["tokio-postgres", "deadpool-postgres", "tokio-postgres-rustls", "rustls", "rustls-native-certs", "sea-query", "sea-query-postgres", "rust_decimal", "thiserror"]

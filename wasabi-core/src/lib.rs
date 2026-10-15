@@ -29,6 +29,7 @@
 //! - [`events`] - Event recording with Firehose batching
 //! - [`tools`] - Utilities (ID generation, i18n strings, graceful shutdown)
 //! - [`opensearch`] - OpenSearch/Elasticsearch client (feature-gated)
+//! - [`postgres`] - PostgreSQL pool, records and schema diff (feature-gated)
 //!
 //! ## Feature Flags
 //!
@@ -42,6 +43,7 @@
 //! - `aws_bedrock` - Bedrock AI model integration
 //! - `aws_ses` - Outbound mail via SES
 //! - `open_search` - OpenSearch client
+//! - `postgres` - PostgreSQL pool, records and declarative table schemas
 //!
 //! ## Environment Variables
 //!
@@ -97,6 +99,14 @@
 //! | `DYNAMO_TABLE_PREFIX` | Prefix for DynamoDB table names | (required for DynamoDB) |
 //! | `FIREHOSE_STREAM_NAME` | Firehose delivery stream name | normalized `APP_NAME` |
 //! | `FIREHOSE_SYSTEM_NAME` | System identifier in Firehose events | normalized `CLUSTER_ID` |
+//!
+//! ### PostgreSQL
+//!
+//! | Variable | Description | Default |
+//! |----------|-------------|---------|
+//! | `POSTGRES_URL` | Connection string | (required for PostgreSQL) |
+//! | `POSTGRES_POOL_SIZE` | Maximum pooled connections | `16` |
+//! | `POSTGRES_CA_FILE` | PEM bundle of extra trusted CAs (e.g. RDS) | (none) |
 //!
 //! ### OpenSearch
 //!
@@ -168,6 +178,10 @@ pub mod opensearch;
 
 /// Event recording and streaming.
 pub mod events;
+
+/// PostgreSQL pool, records and declarative table schemas.
+#[cfg(feature = "postgres")]
+pub mod postgres;
 
 /// Application name from `APP_NAME` environment variable.
 ///
