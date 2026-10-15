@@ -5,7 +5,8 @@
 //! being sent to the configured backend.
 //!
 //! Use [`NoopEventRecorder`] during development or when event recording is disabled.
-//! In production, use [`firehose::FirehoseEventRecorder`] to stream events to AWS.
+//! In production, use `firehose::FirehoseEventRecorder` (feature `aws_firehose`) to stream events
+//! to AWS.
 
 #[cfg(feature = "aws_firehose")]
 pub mod firehose;

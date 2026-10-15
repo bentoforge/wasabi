@@ -278,7 +278,7 @@ impl DynamoClient {
     /// `ValidationException`, and the call is rate-limited per table, so blindly re-issuing it on
     /// every boot would eventually start failing.
     ///
-    /// Both calls are re-tried while DynamoDB throttles them (see [`THROTTLE_RETRIES`]). A service
+    /// Both calls are re-tried, a few times, while DynamoDB throttles them. A service
     /// with a dozen tables provisions them in one burst, so the tail of that burst is throttled
     /// routinely — and giving up there means the table quietly never gets its TTL, with a warning
     /// as the only trace.

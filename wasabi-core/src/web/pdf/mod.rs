@@ -7,9 +7,7 @@
 
 /// Error types for PDF generation.
 pub mod error;
-/// Resolver functions for custom URI schemes.
 pub mod schemes;
-/// Warp response helpers for PDF content.
 pub mod warp;
 mod world;
 

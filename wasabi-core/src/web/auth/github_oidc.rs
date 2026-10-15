@@ -1,6 +1,6 @@
 //! GitHub Actions OIDC authentication.
 //!
-//! Provides a [`ConfigFetcher`](crate::web::auth::authenticator::ConfigFetcher) implementation
+//! Provides a [`ConfigFetcher`] implementation
 //! for authenticating GitHub Actions workflow tokens. Validates that tokens come from allowed
 //! repositories using regex matching.
 //!

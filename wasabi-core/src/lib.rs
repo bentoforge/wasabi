@@ -28,8 +28,8 @@
 //! - [`aws`] - AWS service integrations (S3, DynamoDB, Bedrock, SES)
 //! - [`events`] - Event recording with Firehose batching
 //! - [`tools`] - Utilities (ID generation, i18n strings, graceful shutdown)
-//! - [`opensearch`] - OpenSearch/Elasticsearch client (feature-gated)
-//! - [`postgres`] - PostgreSQL pool, records and schema diff (feature-gated)
+//! - `opensearch` - OpenSearch/Elasticsearch client (feature-gated)
+//! - `postgres` - PostgreSQL pool, records and schema diff (feature-gated)
 //!
 //! ## Feature Flags
 //!
@@ -160,26 +160,19 @@
 use std::env;
 use std::sync::LazyLock;
 
-/// Logging and tracing infrastructure.
 pub mod logging;
 
-/// General-purpose utilities and helpers.
 pub mod tools;
 
-/// HTTP server, authentication, and web utilities.
 pub mod web;
 
-/// AWS service integrations (feature-gated).
 pub mod aws;
 
-/// OpenSearch/Elasticsearch client.
 #[cfg(feature = "open_search")]
 pub mod opensearch;
 
-/// Event recording and streaming.
 pub mod events;
 
-/// PostgreSQL pool, records and declarative table schemas.
 #[cfg(feature = "postgres")]
 pub mod postgres;
 

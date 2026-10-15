@@ -31,9 +31,7 @@ use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::pin::Pin;
 
-/// DynamoDB client with table prefix support.
 pub mod client;
-/// Schema builder helpers for table creation.
 pub mod schema;
 
 /// Extracts the first entity from a query result.

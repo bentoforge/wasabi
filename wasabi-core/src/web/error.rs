@@ -2,7 +2,7 @@
 //!
 //! The [`ApiError`] type carries both an HTTP status code and a message.
 //! Use [`ResultExt`] to attach status codes to `anyhow::Error` chains,
-//! or the [`client_bail!`] and [`status_bail!`] macros for early returns.
+//! or the [`client_bail!`](crate::client_bail) and [`status_bail!`](crate::status_bail) macros for early returns.
 
 use serde::Serialize;
 use std::fmt::{Debug, Display, Formatter};

@@ -2,10 +2,10 @@
 //!
 //! All modules are feature-gated to minimize compile times and dependencies:
 //!
-//! - [`s3`] (`aws_s3`) - S3 client with ETag-based caching and multipart uploads
-//! - [`dynamodb`] (`aws_dynamodb`) - DynamoDB client with table management and query helpers
-//! - [`bedrock`] (`aws_bedrock`) - Bedrock AI model streaming for SSE responses
-//! - [`ses`] (`aws_ses`) - Outbound mail (text, HTML, attachments) via SES
+//! - `s3` (`aws_s3`) - S3 client with ETag-based caching and multipart uploads
+//! - `dynamodb` (`aws_dynamodb`) - DynamoDB client with table management and query helpers
+//! - `bedrock` (`aws_bedrock`) - Bedrock AI model streaming for SSE responses
+//! - `ses` (`aws_ses`) - Outbound mail (text, HTML, attachments) via SES
 //!
 //! # Environment Variables
 //!
@@ -27,19 +27,15 @@
 //! dynamo.put_entity("users", &user)?.send().await?;
 //! ```
 
-/// Bedrock AI model integration for streaming responses.
 #[cfg(feature = "aws_bedrock")]
 pub mod bedrock;
 
-/// DynamoDB client and query utilities.
 #[cfg(feature = "aws_dynamodb")]
 pub mod dynamodb;
 
-/// S3 client with caching and multipart upload support.
 #[cfg(feature = "aws_s3")]
 pub mod s3;
 
-/// Outbound mail via SES.
 #[cfg(feature = "aws_ses")]
 pub mod ses;
 
