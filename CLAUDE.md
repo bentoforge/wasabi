@@ -38,6 +38,7 @@ All features are opt-in. Enable as needed:
 - `aws_s3` - S3 client with caching and multipart upload
 - `aws_dynamodb` - DynamoDB integration
 - `aws_firehose` - AWS Firehose event recording
+- `aws_athena` - Athena queries over the Glue catalog, parameterized, with a result cache
 - `aws_bedrock` - AWS Bedrock AI integration
 - `aws_ses` - Outbound mail via AWS SES (`aws::ses::Mailer`)
 - `open_search` - AWS OpenSearch integration
@@ -54,6 +55,9 @@ All features are opt-in. Enable as needed:
 ### AWS Integrations (`wasabi-core/src/aws/`)
 - Feature-gated modules to avoid bloat
 - `s3.rs` - S3 client with ETag-based caching (`CachedS3Object` trait)
+- `athena.rs` - `AthenaClient` (start → poll → paged results in one call), `Query` with positional
+  `?` parameters, `QueryCache` plus an in-process implementation. A tenant id belongs in a
+  parameter, never in the SQL string.
 - `dynamodb/` - DynamoDB with schema support
 - `bedrock.rs` - AI model integration
 

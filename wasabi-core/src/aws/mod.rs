@@ -6,6 +6,7 @@
 //! - `dynamodb` (`aws_dynamodb`) - DynamoDB client with table management and query helpers
 //! - `bedrock` (`aws_bedrock`) - Bedrock AI model streaming for SSE responses
 //! - `ses` (`aws_ses`) - Outbound mail (text, HTML, attachments) via SES
+//! - `athena` (`aws_athena`) - Athena queries over the Glue catalog, with parameters and a result cache
 //!
 //! # Environment Variables
 //!
@@ -14,6 +15,8 @@
 //! | `S3_BUCKET_SUFFIX` | s3 | Suffix for bucket names (e.g., `myapp.example.com`) |
 //! | `DYNAMO_TABLE_PREFIX` | dynamodb | Prefix for table names (e.g., `myapp-prod`) |
 //! | `MAIL_SES_FROM` | ses | Sender address; mail is disabled if unset |
+//! | `ATHENA_WORKGROUP` | athena | Workgroup to run queries in |
+//! | `ATHENA_DATABASE` | athena | Default Glue database |
 //!
 //! # Usage
 //!
@@ -26,6 +29,9 @@
 //! let dynamo = DynamoClient::from_env().await?;
 //! dynamo.put_entity("users", &user)?.send().await?;
 //! ```
+
+#[cfg(feature = "aws_athena")]
+pub mod athena;
 
 #[cfg(feature = "aws_bedrock")]
 pub mod bedrock;

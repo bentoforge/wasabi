@@ -65,6 +65,7 @@ All integrations are opt-in to keep compile times fast. Enable only what you nee
 | `aws_s3` | S3 client with ETag-based caching, multipart uploads | `aws-sdk-s3` |
 | `aws_dynamodb` | DynamoDB client with table prefix support | `aws-sdk-dynamodb`, `serde_dynamo` |
 | `aws_firehose` | Event streaming to Kinesis Firehose | `aws-sdk-firehose` |
+| `aws_athena` | Parameterized Athena queries with a result cache | `aws-sdk-athena` |
 | `aws_bedrock` | AI model integration with SSE streaming | `aws-sdk-bedrockruntime` |
 | `aws_ses` | Outbound mail (text, HTML, attachments) via SES | `aws-sdk-sesv2` |
 | `open_search` | OpenSearch/Elasticsearch client | `opensearch` |
