@@ -225,7 +225,7 @@ mod tests {
         let db = &db;
         let outcome = retry(|| async move {
             if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
-                fail_with(&db, "23505").await?;
+                fail_with(db, "23505").await?;
             }
             Ok("stored")
         })
@@ -241,7 +241,7 @@ mod tests {
         let db = &db;
         let outcome: Result<()> = retry(|| async move {
             let _ = attempts.fetch_add(1, Ordering::SeqCst);
-            fail_with(&db, "40001").await
+            fail_with(db, "40001").await
         })
         .await;
         assert!(outcome.unwrap_err().is_retryable());
@@ -255,7 +255,7 @@ mod tests {
         let db = &db;
         let outcome: Result<()> = retry(|| async move {
             let _ = attempts.fetch_add(1, Ordering::SeqCst);
-            fail_with(&db, "22012").await
+            fail_with(db, "22012").await
         })
         .await;
         assert!(matches!(outcome.unwrap_err(), Error::Other(_)));
