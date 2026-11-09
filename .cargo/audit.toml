@@ -42,4 +42,16 @@ ignore = [
     # rkyv ^0.7.46, incompatible with the fixed 0.8.17; drop this ignore
     # once rust_decimal references rkyv >= 0.8.17.
     "RUSTSEC-2026-0235",
+    # crypto-bigint 0.5.5 — multiple timing variability issues in operations
+    # intended to be constant-time. Reached through aws-sigv4 -> elliptic-curve
+    # 0.13.8, and aws-sigv4 is a dependency of every aws-sdk-* crate, so unlike
+    # RUSTSEC-2026-0235 above this one really is compiled: `cargo tree
+    # --all-features --target all -i crypto-bigint` prints the whole SDK tree.
+    # No upgrade path from here — the fix is >=0.7.6 while elliptic-curve 0.13.8
+    # pins ^0.5, and `cargo update -p aws-sigv4 -p elliptic-curve` locks nothing
+    # new. Accepted rather than fixed because exploiting a timing channel in our
+    # own outbound request signing requires co-residency with the task, not a
+    # network path to it. Re-evaluate when the AWS SDK moves to
+    # elliptic-curve 0.14.
+    "RUSTSEC-2026-0387",
 ]
