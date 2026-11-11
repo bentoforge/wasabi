@@ -4,8 +4,9 @@
 //! read back in pages — seconds of wall clock, billed per scanned byte. This module wraps that
 //! sequence into one call and adds the two things every caller ends up needing anyway:
 //!
-//! - **Parameters instead of string interpolation** ([`Query::bind`]). A tenant id spliced into SQL
-//!   is an injection in a query whose whole job is to not cross a tenant boundary.
+//! - **Parameters instead of string interpolation** ([`Query::bind`], which quotes what it is
+//!   given). A value spliced into SQL by hand is read as SQL, and the query this exists for is one
+//!   whose whole job is to not cross a tenant boundary.
 //! - **A result cache** ([`QueryCache`]). Aggregates that a nightly ETL rebuilds do not change
 //!   between runs, so asking Athena twice costs money and seconds for an identical answer.
 //!
@@ -35,11 +36,13 @@
 //!     "SELECT supplier_item_number, sum(num_calls) AS calls
 //!        FROM process_product_daily
 //!       WHERE supplier_tenant_id = ? AND event_date BETWEEN ? AND ?
-//!       GROUP BY supplier_item_number",
+//!       GROUP BY supplier_item_number
+//!       LIMIT ?",
 //! )
 //! .bind(tenant_id)
 //! .bind(from)
-//! .bind(to);
+//! .bind(to)
+//! .bind_number(50);
 //!
 //! let result = athena.query_cached(&query, Duration::from_secs(3600)).await?;
 //! for row in result.rows() {
@@ -90,10 +93,26 @@ const RESULTS_PAGE_SIZE: i32 = 1_000;
 
 /// A SQL statement plus the values bound to its `?` placeholders.
 ///
-/// Athena's execution parameters are positional and always travel as strings; the engine casts them
-/// against the column they are compared to. They work in value positions — `WHERE`, `HAVING`,
-/// `VALUES` — and **not** for identifiers: a table or column name cannot be parameterised, so those
-/// have to be fixed in the SQL itself.
+/// Athena's execution parameters are **not** the bound values of a prepared statement. Each one is
+/// parsed as an expression in the slot its `?` stands in, so an unquoted value is read as SQL
+/// rather than as text: `SELECT ?` bound to `1+1` answers `2`, and a date bound as `2026-01-01`
+/// fails with `Cannot check if varchar is BETWEEN integer and integer`, because the engine read it
+/// as two subtractions.
+///
+/// The slot is the bound: a parameter is parsed as one expression node and cannot grow the
+/// statement around it. `supplier_tenant_id = ?` bound to `'x' OR TRUE` is a type error, not a
+/// `WHERE` that matches everything, and column references and subqueries inside a parameter are
+/// not resolved — they come back as the string they were spelled with (all three checked against
+/// Athena on 2026-11-11). So this is a correctness hazard, not a way to restructure a query.
+///
+/// [`Query::bind`] quotes anyway. A value that reaches SQL as text whatever it is spelled like is
+/// one less thing resting on where the engine happens to draw that line, and it is the only way a
+/// value containing a `'` survives at all. [`Query::bind_number`] covers the positions where a
+/// quoted value is not valid SQL — `LIMIT`, `OFFSET` — and comparisons against numeric columns.
+///
+/// Parameters are positional, and they work in value positions only — `WHERE`, `HAVING`, `VALUES`,
+/// `LIMIT`. An identifier cannot be parameterised: a table or column name has to be fixed in the
+/// SQL itself.
 #[derive(Clone, Debug)]
 pub struct Query {
     sql: String,
@@ -109,9 +128,28 @@ impl Query {
         }
     }
 
-    /// Binds the next `?`, in order.
+    /// Binds the next `?`, in order, as a SQL string literal.
+    ///
+    /// The value is quoted and every `'` inside it doubled, so it reaches Athena as data however
+    /// it is spelled. This is the binding to reach for by default: a tenant id, a date, a search
+    /// term — anything that came out of a token, a query string or a user.
     #[must_use]
     pub fn bind(mut self, value: impl Display) -> Self {
+        self.parameters.push(quote(&value.to_string()));
+        self
+    }
+
+    /// Binds the next `?`, in order, as a bare numeral.
+    ///
+    /// For the positions where a quoted value is not valid SQL — `LIMIT`, `OFFSET` — and for
+    /// comparisons against a numeric column, where a string literal fails Athena's type check.
+    ///
+    /// Takes an `i64` rather than anything printable on purpose: a float prints as `inf` or `NaN`
+    /// at the edges, and a `Display` impl can print whatever it likes, so neither can be dropped
+    /// into SQL unquoted. A non-integer belongs in [`Self::bind`], compared against a column
+    /// Athena casts it to.
+    #[must_use]
+    pub fn bind_number(mut self, value: i64) -> Self {
         self.parameters.push(value.to_string());
         self
     }
@@ -121,7 +159,8 @@ impl Query {
         &self.sql
     }
 
-    /// The bound values, in the order they were bound.
+    /// The parameters as they will be sent, in the order they were bound — so already quoted for
+    /// those that went through [`Self::bind`].
     pub fn parameters(&self) -> &[String] {
         &self.parameters
     }
@@ -146,6 +185,24 @@ impl Query {
         }
         key
     }
+}
+
+/// Renders `value` as a SQL string literal: wrapped in single quotes, with every `'` doubled.
+///
+/// Doubling is the whole of the escaping. Trino's plain string literals have no backslash escape —
+/// `'a\b'` is three characters — so there is no second sequence that could carry meaning out of
+/// the quotes, and the mapping is total: whatever bytes go in come back as one literal.
+fn quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for character in value.chars() {
+        if character == '\'' {
+            quoted.push('\'');
+        }
+        quoted.push(character);
+    }
+    quoted.push('\'');
+    quoted
 }
 
 /// Appends one length-prefixed part to a cache key.
@@ -833,6 +890,65 @@ mod tests {
         assert_eq!(articles.len(), 2);
         assert_eq!(articles[0].item, "4711");
         assert_eq!(articles[1].calls, 3);
+    }
+
+    /// Athena parses a parameter as an expression, so an unquoted value is read as SQL: these pin
+    /// the quoting that keeps it text. The date case is the one that bites in practice —
+    /// `2026-01-01` unquoted is arithmetic — and a value carrying a `'` does not survive at all
+    /// without the doubling.
+    #[test]
+    fn bind_renders_a_value_as_a_string_literal() {
+        let query = Query::new("SELECT ?").bind("tenant-a");
+
+        assert_eq!(query.parameters(), ["'tenant-a'"]);
+    }
+
+    #[test]
+    fn bind_doubles_the_quotes_inside_a_value() {
+        let query = Query::new("SELECT ?").bind("O'Brien's");
+
+        assert_eq!(query.parameters(), ["'O''Brien''s'"]);
+    }
+
+    /// Unquoted, Athena answers `2` for this one.
+    #[test]
+    fn bind_keeps_an_expression_from_being_evaluated() {
+        let query = Query::new("SELECT ?").bind("1+1");
+
+        assert_eq!(query.parameters(), ["'1+1'"]);
+    }
+
+    /// Athena confines a parameter to its own slot, so this cannot reach the `WHERE` around it
+    /// either way. It still has to arrive as the string it is.
+    #[test]
+    fn bind_keeps_a_tenant_inside_its_literal() {
+        let query = Query::new("SELECT 1 WHERE tenant = ?").bind("x' OR TRUE --");
+
+        assert_eq!(query.parameters(), ["'x'' OR TRUE --'"]);
+    }
+
+    /// A backslash is an ordinary character in a Trino string literal, so it needs no escape — and
+    /// must not get one, or the value changes.
+    #[test]
+    fn bind_leaves_backslashes_alone() {
+        let query = Query::new("SELECT ?").bind(r"a\'b");
+
+        assert_eq!(query.parameters(), [r"'a\''b'"]);
+    }
+
+    /// `LIMIT '50'` is a syntax error, which is why this one stays bare.
+    #[test]
+    fn bind_number_stays_a_bare_numeral() {
+        let query = Query::new("SELECT 1 LIMIT ?").bind_number(50);
+
+        assert_eq!(query.parameters(), ["50"]);
+    }
+
+    #[test]
+    fn bind_number_carries_a_negative_value() {
+        let query = Query::new("SELECT ?").bind_number(-7);
+
+        assert_eq!(query.parameters(), ["-7"]);
     }
 
     /// The parameters have to be part of the key, or the first tenant to run a query would answer
