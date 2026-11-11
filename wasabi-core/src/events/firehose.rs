@@ -70,6 +70,31 @@ where
     s.serialize_str(&formatted)
 }
 
+/// Lowercases `value` and replaces every run of non-alphanumeric characters with a single `_`.
+///
+/// This is what turns a host-shaped name into one that survives as a Glue partition value and as a
+/// column in a query: `pip.durablox.com` becomes `pip_durablox_com`.
+fn normalize(value: &str) -> String {
+    NON_CHARS
+        .replace_all(&value.to_lowercase(), "_")
+        .into_owned()
+}
+
+/// The `system` every event of this process is recorded under.
+///
+/// `FIREHOSE_SYSTEM_NAME` if it is set, otherwise [`CLUSTER_ID`] normalized — the same value
+/// [`FirehoseEventRecorder::from_env`] writes into each event's envelope.
+///
+/// Public because the read side needs it. Events land in a data lake partitioned by `system`, so a
+/// query that wants this deployment's own rows has to filter by exactly the string the writer used;
+/// a service that derives it a second time for itself is one refactoring away from reading another
+/// environment's numbers, or none at all. Deriving it costs nothing, so callers need not hold on to
+/// the result.
+#[must_use]
+pub fn system_name() -> String {
+    env::var("FIREHOSE_SYSTEM_NAME").unwrap_or_else(|_| normalize(&CLUSTER_ID))
+}
+
 /// Event recorder that batches and streams events to AWS Firehose.
 ///
 /// Create via [`from_env()`](Self::from_env) which reads configuration from
@@ -103,16 +128,8 @@ impl FirehoseEventRecorder {
             .await;
         let client = Client::new(&config);
 
-        let stream = env::var("FIREHOSE_STREAM_NAME").unwrap_or_else(|_| {
-            NON_CHARS
-                .replace_all(&APP_NAME.to_lowercase(), "_")
-                .into_owned()
-        });
-        let system = env::var("FIREHOSE_SYSTEM_NAME").unwrap_or_else(|_| {
-            NON_CHARS
-                .replace_all(&CLUSTER_ID.to_lowercase(), "_")
-                .into_owned()
-        });
+        let stream = env::var("FIREHOSE_STREAM_NAME").unwrap_or_else(|_| normalize(&APP_NAME));
+        let system = system_name();
 
         tracing::info!(
             "Sending events to Firehose as system: {} into stream: {}",
@@ -232,5 +249,29 @@ impl EventRecorder for FirehoseEventRecorder {
         if let Err(err) = self.record_event(wrapper).await {
             tracing::error ! ( ? event, % timestamp, ? err, "Failed to record event");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shape that actually occurs: a cluster id is a host name, and the dots have to go or the
+    /// value cannot be a partition.
+    #[test]
+    fn normalize_turns_a_host_name_into_a_partition_value() {
+        assert_eq!(normalize("pip.durablox.com"), "pip_durablox_com");
+    }
+
+    #[test]
+    fn normalize_lowercases() {
+        assert_eq!(normalize("PIP-Core"), "pip_core");
+    }
+
+    /// A run of separators collapses into one `_`, so two spellings of the same name cannot end up
+    /// as two partitions.
+    #[test]
+    fn normalize_collapses_a_run_of_separators() {
+        assert_eq!(normalize("pip -- core"), "pip_core");
     }
 }
